@@ -1,16 +1,30 @@
 #!/usr/bin/env python
 """
 PREPROCESS.py – Core preprocessing utilities for tomography datasets
-2023-2026
 
 Author: Vojtech Kulvait
+Year: 2026
 License: GNU GPL v3
 """
 
 import numpy as np
 import scipy.ndimage as ndi
 from scipy.ndimage import median_filter, convolve
-import warnings
+import logging
+
+
+# Create a logger specific to this module
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO) # Set the logging level to INFO
+# Create a console handler and set its level to INFO
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+# Create a formatter and set it for the handler
+formatter = logging.Formatter('%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s', datefmt='%d.%m.%Y %H:%M:%S')
+ch.setFormatter(formatter)
+# Add the handler to the logger
+log.addHandler(ch)
+log.propagate = False # Prevent log messages from being propagated to the root logger
 
 
 #	Parameters
@@ -85,7 +99,7 @@ def remove_hot_pixels(frame, iterations, filter_size, correct_threshold_abs_sigm
 	if zinger_algorithm:
 		# Zinger algorithm described in https://opg.optica.org/oe/fulltext.cfm?uri=oe-29-12-17849
 		if filter_size % 2 == 0:
-			warnings.warn("Zinger algorithm expects odd filter size, but got %d. Effective filter size will be %d."%(filter_size, filter_size+1))
+			log.warning("Zinger algorithm expects odd filter size, but got %d. Effective filter size will be %d."%(filter_size, filter_size+1))
 			filter_size += 1
 		kernel = np.zeros((filter_size, filter_size), dtype=np.float32)
 		size = filter_size // 2

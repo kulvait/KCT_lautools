@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 """
-2023-2026
-
-@author: Vojtech Kulvait
-@license: GNU GPL v3
-
 This script removes transient bright pixels (e.g. hot pixels or cosmic ray hits) 
 from a 3D image stack (time or depth series) stored in the DEN format. It works 
 by applying an iterative median filter to each frame, identifying outlier pixels 
 that deviate from their local neighborhood by more than a specified number of 
 standard deviations, and replacing them with the corresponding median value.
+
+Created: 03/2026, use core functionality of destar.py from syscripts
+
+@author: Vojtech Kulvait
+@license: GNU GPL v3
+
 
 Hot pixel / zinger removal tool for 2D/3D image stacks.
 	
@@ -20,24 +21,24 @@ Hot pixel / zinger removal tool for 2D/3D image stacks.
 	Zarr format:
 	  If the argument contains a colon ':' it is interpreted as:
 	
-	      /path/to/zarr_container:/path/inside/zarr
+		  /path/to/zarr_container:/path/inside/zarr
 	
 	  Examples:
-	      data.zarr:/volume
-	      /data/experiment.zarr:/group/subgroup/array
+		  data.zarr:/volume
+		  /data/experiment.zarr:/group/subgroup/array
 	
 	  - Left side  → filesystem path to Zarr store
 	  - Right side → internal array path inside the store
 	
 	  Zarr storage type is inferred from the left-side suffix:
 	
-	      *.zarr        → directory-based Zarr store
-	      *.zip, *.zar  → zipped Zarr store (read/write as archive)
+		  *.zarr		→ directory-based Zarr store
+		  *.zip, *.zar	→ zipped Zarr store (read/write as archive)
 	
 	DEN format:
 	  If the argument does NOT contain ':' it is interpreted as a DEN file:
 	
-	      /path/to/file.den
+		  /path/to/file.den
 	
 	Notes:
 	- Zarr supports parallel writes (no locking required).
@@ -71,16 +72,16 @@ Hot pixel / zinger removal tool for 2D/3D image stacks.
 	
 	   Commonly used with median filtering.
 	   Best suited for:
-	     - detector artifacts
-	     - low-intensity regions
+		 - detector artifacts
+		 - low-intensity regions
 	
 	2) Relative thresholding:
 	   |pixel - filtered| / |filtered|
 	
 	   Used in ALgotom and similar methods.
 	   Best suited for:
-	     - high dynamic range data
-	     - intensity-dependent noise
+		 - high dynamic range data
+		 - intensity-dependent noise
 	
 	Design note:
 	------------
@@ -103,20 +104,40 @@ Hot pixel / zinger removal tool for 2D/3D image stacks.
 """
 
 import argparse
+from lautools import remove_hot_pixels
 from denpy import DEN 
 from denpy import ZAR
 import zarr
 import numpy as np
-from scipy.ndimage import median_filter
-from scipy.ndimage import convolve
 from multiprocessing.dummy import Process, Lock, Pool
 import multiprocessing
 import time
 import traceback
-import warnings
-from lautools import remove_hot_pixels
+import logging
 
 
+# Create a logger specific to this module
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO) # Set the logging level to INFO
+# Create a console handler and set its level to INFO
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+# Create a formatter and set it for the handler
+formatter = logging.Formatter('%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s', datefmt='%d.%m.%Y %H:%M:%S')
+ch.setFormatter(formatter)
+# Add the handler to the logger
+log.addHandler(ch)
+log.propagate = False # Prevent log messages from being propagated to the root logger
+
+
+# Global variables for controling I/O and synchronization in workers
+inputIsZarr = False
+outputIsZarr = False
+maskIsZarr = False
+inputArray = None
+outputArray = None
+maskOutputArray = None
+outputType = np.float32
 
 # Global write_lock for workers
 write_lock = None
@@ -133,7 +154,8 @@ def processFrame(ARG, k):
 			f = inputArray[k]
 		else:
 			f = DEN.getFrame(ARG.inputFile, k)
-		f_filtered, f_corrupted_pixel, corrected_pixels = remove_hot_pixels(f, iterations=ARG.iterations, filter_size=ARG.filter_size, correct_threshold_abs_sigma=ARG.filter_threshold, zinger_algorithm=ARG.zinger_algorithm)
+		# Signature is def remove_hot_pixels(frame, iterations, filter_size, correct_threshold_abs_sigma=3.0, correct_threshold_abs=None, correct_threshold_rel_sigma=None, correct_threshold_rel=None, zinger_algorithm=False, filter_large_components=False, large_component_minpixcount=10, epsilon=1e-6):
+		f_filtered, f_corrupted_pixel, corrected_pixels = remove_hot_pixels(frame=f, iterations=ARG.filter_iterations, filter_size=ARG.filter_size, correct_threshold_abs_sigma=ARG.filter_threshold_abs_sigma, correct_threshold_abs=ARG.filter_threshold_abs, correct_threshold_rel_sigma=ARG.filter_threshold_rel_sigma, correct_threshold_rel=ARG.filter_threshold_rel, zinger_algorithm=ARG.zinger_algorithm)
 		# Write (locked)
 		if outputIsZarr == True:
 			outputArray[k] = f_filtered.astype(outputType)
@@ -145,14 +167,14 @@ def processFrame(ARG, k):
 		)
 		if write_lock and needs_sync:
 			write_lock.acquire()
-		try:
-			if not outputIsZarr:
-				DEN.writeFrame(ARG.outputFile, k, f_filtered, force=True)
-			if ARG.output_mask is not None and not maskIsZarr:
-				DEN.writeFrame(ARG.output_mask, k, f_corrupted_pixel.astype(np.uint8), force=True)
-		finally:
-			if write_lock:
-				write_lock.release()
+			try:
+				if not outputIsZarr:
+					DEN.writeFrame(ARG.outputFile, k, f_filtered, force=True)
+				if ARG.output_mask is not None and not maskIsZarr:
+					DEN.writeFrame(ARG.output_mask, k, f_corrupted_pixel.astype(np.uint8), force=True)
+			finally:
+				if write_lock:
+					write_lock.release()
 		return {"k": k, "pixels": corrected_pixels, "error": None}
 	except Exception:
 		return {"k": k, "pixels": 0, "error": traceback.format_exc()}
@@ -163,16 +185,26 @@ class FakeAsyncResult:
 	def get(self):
 		return self._value
 
+def validate_thresholds(ARG):
+	# Check if at least one threshold is set
+	if not any([ARG.filter_threshold_abs, ARG.filter_threshold_rel,
+				ARG.filter_threshold_abs_sigma, ARG.filter_threshold_rel_sigma]):
+		log.warning("No threshold specified, defaulting to --filter-threshold-abs-sigma 3.0")
+		ARG.filter_threshold_abs_sigma = 3.0
+
 def main():
 	parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-	    description="Hot pixel / zinger removal tool for 2D/3D image stacks."
+		description="Hot pixel / zinger removal tool for 2D/3D image stacks.", epilog="Example usage:\n\n"
+		"  removeHotPixels.py input.den output.den --filter-size 5 --filter-threshold-abs-sigma 3 --filter-iterations 1\n"
+		"  removeHotPixels.py input.zarr:/volume output.zarr:/volume --filter-size 5 --filter-threshold-rel 0.1 --zinger-algorithm\n"
+		"  removeHotPixels.py input.den output.zarr:/volume --filter-size 5 --filter-threshold-rel-sigma 3\n"
 	)
 	
 	parser.add_argument("inputFile", help="Input array to filter, DEN or Zarr format. For Zarr use /path/to/store:/array/path, without ':' it is interpreted as DEN file.")
 	parser.add_argument("outputFile", help="Output array, DEN or Zarr format. For Zarr use /path/to/store:/array/path, without ':' it is interpreted as DEN file.")
 	parser.add_argument("--output-mask", help="Output array for the binary mask of detected outliers. Output is np.uint8 array where 1 indicates processed pixel while 0 is unchanged pixel. For Zarr use /path/to/store:/array/path, without ':' it is interpreted as DEN file.", default=None)
 	parser.add_argument("--filter-size", type=int, default=5, help="Size parameter to the scipy.ndimage.median_filter or Zinger kernel size.")
-	parser.add_argument("--filter-threshold-abs", type=float, default=3.0, help="Absolute threshold to substitute data.")
+	parser.add_argument("--filter-threshold-abs", type=float, default=None, help="Absolute threshold to substitute data.")
 	parser.add_argument("--filter-threshold-rel", type=float, default=None, help="Relative threshold to substitute data.")
 	parser.add_argument("--filter-threshold-abs-sigma", type=float, default=None, help="Number of standard deviations of absolute difference to substitute data.")
 	parser.add_argument("--filter-threshold-rel-sigma", type=float, default=None, help="Number of standard deviations of relative difference to substitute data.")
@@ -189,10 +221,15 @@ def main():
 	parser.add_argument("--keep-input-dtype", help="Keep input data type in output, otherwise output is float32.", action="store_true")
 	parser.add_argument("--verbose", help="increase output verbosity", action="store_true")
 	ARG = parser.parse_args()
+	validate_thresholds(ARG)
 	
-	inputIsZarr = False
-	outputIsZarr = False
-	maskIsZarr = False
+	global inputArray
+	global inputIsZarr
+	global outputArray
+	global outputIsZarr
+	global maskOutputArray
+	global maskIsZarr
+	global outputType
 	
 	if ":" in ARG.inputFile:
 		zarTokens = ARG.inputFile.split(":", 1)
@@ -204,7 +241,7 @@ def main():
 			zarInputStore = zarr.storage.ZipStore(zarStorePath)
 		else:
 			zarInputStore = zarr.storage.LocalStore(zarStorePath)
-		print(f"Opening Zarr array from store '{zarStorePath}' with path '{zarPath}'")
+		log.info(f"Opening Zarr array from store '{zarStorePath}' with path '{zarPath}'")
 		inputArray = zarr.open_array(zarInputStore, mode="r", path=zarPath)
 		inputIsZarr = True
 		if len(inputArray.shape) != 3:
@@ -228,31 +265,22 @@ def main():
 	frameSize = xdim * ydim
 	totalSize = frameSize * zdim
 	
-	print(f"Starting processing file '{ARG.inputFile}' containing {zdim} frames of size {xdim}x{ydim} to produce '{ARG.outputFile}'")
-	print(f"Filter size: {ARG.filter_size}, Threshold: {ARG.filter_threshold}, Iterations: {ARG.iterations}")
-	
-	if ARG.j < 0:
-		ARG.j = multiprocessing.cpu_count()
-		print("Starting threadpool of %d threads, optimal value multiprocessing.cpu_count()"%(ARG.j))
-	elif ARG.j == 0:
-		print("No threading will be used ARG.j=0.")
-	else:
-		print("Starting threadpool of %d threads, optimal value multiprocessing.cpu_count()=%d"%(ARG.j, multiprocessing.cpu_count()))
-	
+	outputZarStorePath = None
 	if ":" in ARG.outputFile:
 		zarTokens = ARG.outputFile.split(":", 1)
-		zarStorePath = zarTokens[0]
+		outputZarStorePath = zarTokens[0]
 		zarPath = zarTokens[1]
 		if zarPath == "/":
 			zarPath = ""
-		if zarStorePath.endswith(".zip") or zarStorePath.endswith(".zar"):
-			zarOutputStore = zarr.storage.ZipStore(zarStorePath)
+		if outputZarStorePath.endswith(".zip") or outputZarStorePath.endswith(".zar"):
+			zarOutputStore = zarr.storage.ZipStore(outputZarStorePath, mode="w")
+			zarOutputStore._sync_open() # After this fix might be removed https://github.com/zarr-developers/zarr-python/issues/3846
 		else:
-			zarOutputStore = zarr.storage.LocalStore(zarStorePath)
-		print(f"Creating Zarr array in store '{zarStorePath}' with path '{zarPath}'")
+			zarOutputStore = zarr.storage.LocalStore(outputZarStorePath, mode="w")
+		log.info(f"Creating Zarr array in store '{outputZarStorePath}' with path '{zarPath}'")
 		codec = ZAR.get_compressor(ARG.zarr_compression, clevel=ARG.zarr_clevel, zarrv2=False, dtype=outputType)
 		outputArray = zarr.create_array(
-				store=zarOutputStore,
+				store=zarr.storage.StorePath(zarOutputStore, zarPath),
 				shape=(zdim, ydim, xdim),
 				chunks=(1, ydim, xdim),
 				dtype=outputType,
@@ -269,16 +297,20 @@ def main():
 			maskZarTokens = ARG.output_mask.split(":", 1)
 			maskZarStorePath = maskZarTokens[0]
 			maskZarPath = maskZarTokens[1]
-			if maskZarPath == "/":
-				maskZarPath = ""
-			if maskZarStorePath.endswith(".zip") or maskZarStorePath.endswith(".zar"):
-				maskZarOutputStore = zarr.storage.ZipStore(maskZarStorePath)
+			if outputZarStorePath is not None and maskZarStorePath == outputZarStorePath:
+				maskZarOutputStore = zarOutputStore
 			else:
-				maskZarOutputStore = zarr.storage.LocalStore(maskZarStorePath)
-			print(f"Creating Zarr array for mask in store '{maskZarStorePath}' with path '{maskZarPath}'")
+				if maskZarPath == "/":
+					maskZarPath = ""
+				if maskZarStorePath.endswith(".zip") or maskZarStorePath.endswith(".zar"):
+					maskZarOutputStore = zarr.storage.ZipStore(maskZarStorePath, mode="w")
+					maskZarStorePath.open() # After this fix might be removed https://github.com/zarr-developers/zarr-python/issues/3846
+				else:
+					maskZarOutputStore = zarr.storage.LocalStore(maskZarStorePath, mode="w")
+			log.info(f"Creating Zarr array for mask in store '{maskZarStorePath}' with path '{maskZarPath}'")
 			codec = ZAR.get_compressor(ARG.zarr_compression, clevel=ARG.zarr_clevel, zarrv2=False, dtype=np.uint8)
 			maskOutputArray = zarr.create_array(
-					store=maskZarOutputStore,
+					store=zarr.storage.StorePath(maskZarOutputStore, maskZarPath),
 					shape=(zdim, ydim, xdim),
 					chunks=(1, ydim, xdim),
 					dtype=np.uint8,
@@ -287,8 +319,29 @@ def main():
 					overwrite=True,
 				)
 			maskIsZarr = True
+		else:
+			DEN.writeEmptyDEN(ARG.output_mask, dimspec, force=True, elementtype=np.dtype('<u1'))
+	
+	print(f"Starting processing file '{ARG.inputFile}' containing {zdim} frames of size {xdim}x{ydim} to produce '{ARG.outputFile}'")
+	print(f"Filter size: {ARG.filter_size}, iterations: {ARG.filter_iterations}, zinger algorithm: {ARG.zinger_algorithm}")
+	# Threshold information
+	if ARG.filter_threshold_abs is not None:
+		print(f"Applying absolute threshold with value: {ARG.filter_threshold_abs}")
+	if ARG.filter_threshold_rel is not None:
+		print(f"Applying relative threshold with value: {ARG.filter_threshold_rel}")
+	if ARG.filter_threshold_abs_sigma is not None:
+		print(f"Applying absolute threshold based on {ARG.filter_threshold_abs_sigma} standard deviations.")
+	if ARG.filter_threshold_rel_sigma is not None:
+		print(f"Applying relative threshold based on {ARG.filter_threshold_rel_sigma} standard deviations.")
+	
+	if ARG.j < 0:
+		ARG.j = multiprocessing.cpu_count()
+		print("Starting threadpool of %d threads, optimal value multiprocessing.cpu_count()"%(ARG.j))
+	elif ARG.j == 0:
+		print("No threading will be used ARG.j=0.")
 	else:
-		DEN.writeEmptyDEN(ARG.output_mask, dimspec, force=True, elementtype=np.dtype('<u1'))
+		print("Starting threadpool of %d threads, optimal value multiprocessing.cpu_count()=%d"%(ARG.j, multiprocessing.cpu_count()))
+	
 	results = []
 	if ARG.j == 0:
 		for k in range(zdim):
@@ -302,6 +355,7 @@ def main():
 			results.append(res)
 		tp.close()
 		tp.join()
+	
 	
 	errors = []
 	total_pixels_corrected = 0

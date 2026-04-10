@@ -2,12 +2,12 @@
 
 **lautools** is a Python package for preprocessing, filtering, and managing tomographic datasets. It provides reusable Python modules and command-line utilities for cleaning, correcting, and analyzing raw tomography data. As the Python codebase grows, **lautools** is intended to be a stable, maintainable foundation for tomographic data workflows.
 
-It is designed to integrate seamlessly with:
+It is designed to integrate seamlessly with other KCT python packages, particularly:
 
+- **denpy** – for handling DEN and Zarr formats I/O and storage 
 - **laupy** – for orchestration, job submission, and SLURM workflows  
-- **denpy** – for handling DEN and Zarr dataset formats  
 
-By separating preprocessing and I/O from orchestration, **lautools** provides a reliable, modular codebase for researchers and engineers working on tomographic data processing.
+By focusing on data processing **lautools** provides a reliable, modular codebase for researchers and engineers working on tomographic data processing.
 
 ## Motivation
 
@@ -97,7 +97,7 @@ The development of this package was supported by [Hi ACTS Use Case Initiatives 2
 
 Unless otherwise specified in the source files, this project is licensed under the GNU General Public License v3.0.
 
-Copyright (C) 2025-2026 Vojtěch Kulvait
+Copyright (C) 2026 Vojtěch Kulvait
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
