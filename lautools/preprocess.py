@@ -87,14 +87,21 @@ def delete_large_components(mask: np.ndarray, max_size: int) -> np.ndarray:
 #        Boolean mask of corrected pixels.
 #    corrected_pixel_count : int
 #        Total number of corrected pixels in the frame.
-def remove_hot_pixels(frame, iterations, filter_size, correct_threshold_abs_sigma=3.0, correct_threshold_abs=None, correct_threshold_rel_sigma=None, correct_threshold_rel=None, zinger_algorithm=False, filter_large_components=False, large_component_minpixcount=10, epsilon=1e-6):
+def remove_hot_pixels(frame, iterations, filter_size, correct_threshold_abs_sigma=3.0, correct_threshold_abs=None, correct_threshold_rel_sigma=None, correct_threshold_rel=None, correct_threshold_local=None, correct_threshold_local_sigma=None, zinger_algorithm=False, filter_large_components=False, large_component_minpixcount=10, epsilon=1e-6):
 	"""Detect and correct hot pixels in a 2D image frame using median or Zinger filtering."""
 	assert any([
 	correct_threshold_abs_sigma is not None,
 	correct_threshold_abs is not None,
 	correct_threshold_rel_sigma is not None,
-	correct_threshold_rel is not None
+	correct_threshold_rel is not None,
+	correct_threshold_local is not None,
+	correct_threshold_local_sigma is not None,
 ]), "At least one threshold must be set"
+#	log.info("Starting hot pixel removal")
+#	log.info("iterations=%d, filter_size=%d, zinger_algorithm=%s"%(iterations, filter_size, zinger_algorithm))
+#	if filter_large_components:
+#		log.info("filter_large_components=%s, large_component_minpixcount=%d"%(filter_large_components, large_component_minpixcount))
+#	log.info("correct_threshold_abs_sigma=%s, correct_threshold_abs=%s, correct_threshold_rel_sigma=%s, correct_threshold_rel=%s, epsilon=%.2e"%(str(correct_threshold_abs_sigma), str(correct_threshold_abs), str(correct_threshold_rel_sigma), str(correct_threshold_rel), epsilon))
 	xi = frame.astype(np.float32)
 	if zinger_algorithm:
 		# Zinger algorithm described in https://opg.optica.org/oe/fulltext.cfm?uri=oe-29-12-17849
@@ -118,20 +125,33 @@ def remove_hot_pixels(frame, iterations, filter_size, correct_threshold_abs_sigm
 		else:
 			frame_filtered = median_filter(xi, size=filter_size, mode="reflect")
 		frame_dif = xi - frame_filtered
-		frame_filtered_sign = np.sign(frame_filtered)
-		frame_filtered_sign[frame_filtered_sign == 0] = 1
-		frame_dif_rel = frame_dif / (frame_filtered + epsilon * frame_filtered_sign)
+		frame_dif_rel = frame_dif / (np.abs(frame_filtered) + epsilon)# Increase detection sensitivity for low-intensity pixels
+		#Local filtering of the difference to reduce influence of large-scale variations
+		#frame_dif_med = median_filter(np.abs(frame_dif), size=filter_size, mode="reflect")
+		#frame_dif_rel = frame_dif / (frame_dif_med + epsilon)
+		
 		flt = np.zeros_like(xi, dtype=bool)
 		if correct_threshold_abs_sigma is not None:
-			frame_dif_std = np.std(frame_dif)
+			frame_dif_std = np.std(np.abs(frame_dif))
+			#frame_dif_std = np.median(np.abs(frame_dif)) * 1.4826 # Robust estimate of std from median absolute deviation
 			flt |= np.abs(frame_dif) > correct_threshold_abs_sigma * frame_dif_std
 		if correct_threshold_abs is not None:
 			flt |= np.abs(frame_dif) > correct_threshold_abs
 		if correct_threshold_rel_sigma is not None:
-			frame_dif_rel_std = np.std(frame_dif_rel)
-			flt |= np.abs(frame_dif_rel) > correct_threshold_rel_sigma * frame_dif_rel_std
+			#frame_dif_rel_std = np.std(np.abs(frame_dif_rel)) ... use MAD due to unstable division by potentially small values
+			frame_dif_rel_mad = np.median(np.abs(frame_dif_rel)) * 1.4826 # Robust estimate of std from median absolute deviation
+			flt |= np.abs(frame_dif_rel) > correct_threshold_rel_sigma * frame_dif_rel_mad
 		if correct_threshold_rel is not None:
 			flt |= np.abs(frame_dif_rel) > correct_threshold_rel
+		if correct_threshold_local_sigma is not None or correct_threshold_local is not None:
+			frame_dif_med = median_filter(np.abs(frame_dif), size=2*filter_size, mode="reflect")
+			frame_dif_local = frame_dif / (frame_dif_med + epsilon) # Local relative difference to adapt to local variations in the image
+			if correct_threshold_local_sigma is not None:
+				#frame_dif_local_std = np.std(np.abs(frame_dif_local)) ... use MAD due to unstable division by potentially small values
+				frame_dif_local_mad = np.median(np.abs(frame_dif_local)) * 1.4826
+				flt |= np.abs(frame_dif_local) > correct_threshold_local_sigma * frame_dif_local_mad
+			if correct_threshold_local is not None:
+				flt |= np.abs(frame_dif_local) > correct_threshold_local
 		xi[flt] = frame_filtered[flt]
 		mask_corrupted_pixel |= flt
 	if filter_large_components:
