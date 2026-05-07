@@ -20,6 +20,7 @@ setup(
     entry_points={
     'console_scripts': [
         'removeHotPixels =  lautools.scripts.removeHotPixels:main',
+        'createTickFile =  lautools.scripts.createTickFile:main',
     ]
     },
     # *strongly* suggested for sharing
