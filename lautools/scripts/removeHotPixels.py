@@ -116,6 +116,12 @@ import sys
 import traceback
 import logging
 import asyncio
+# Register numcodecs codecs
+from imagecodecs.numcodecs import register_codecs as register_numcodecs_codecs
+from imagecodecs.zarr import register_codecs as register_zarr_codecs
+register_numcodecs_codecs()
+register_zarr_codecs()
+
 
 
 # Create a logger specific to this module
