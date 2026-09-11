@@ -52,7 +52,7 @@ setup(
             "removeHotPixels = lautools.scripts.removeHotPixels:main",
             "createTickFile = lautools.scripts.createTickFile:main",
             "GPU = lautools.scripts.GPU:main",
-            "lautools-wxapp = lautools.wxapp:main",
+            "lautools-browser = lautools.browser:main",
         ]
     },
     version=__version__,
