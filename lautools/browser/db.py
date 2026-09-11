@@ -10,6 +10,8 @@ class Location:
     name: str
     path: Path
     last_access: datetime | None
+    description: str | None
+    last_selected: bool
 
 
 class LaupyDB:
@@ -24,11 +26,13 @@ class LaupyDB:
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 path TEXT NOT NULL UNIQUE,
-                last_access TEXT
+                last_access TEXT,
+                description TEXT,
+                last_selected INTEGER NOT NULL DEFAULT 0
             )
         """)
 
-        # Handle databases created with the old schema.
+        # Handle databases created with older schemas.
         columns = {
             row[1]
             for row in self.connection.execute(
@@ -41,51 +45,53 @@ class LaupyDB:
                 "ALTER TABLE locations ADD COLUMN last_access TEXT"
             )
 
+        if "description" not in columns:
+            self.connection.execute(
+                "ALTER TABLE locations ADD COLUMN description TEXT"
+            )
+
+        if "last_selected" not in columns:
+            self.connection.execute(
+                "ALTER TABLE locations "
+                "ADD COLUMN last_selected INTEGER NOT NULL DEFAULT 0"
+            )
+
         self.connection.commit()
+
+    def _row_to_location(self, row) -> Location:
+        return Location(
+            id=row[0],
+            name=row[1],
+            path=Path(row[2]),
+            last_access=(
+                datetime.fromisoformat(row[3])
+                if row[3] is not None
+                else None
+            ),
+            description=row[4],
+            last_selected=bool(row[5]),
+        )
 
     def list_locations(self) -> list[Location]:
         rows = self.connection.execute("""
-            SELECT id, name, path, last_access
+            SELECT id, name, path, last_access, description, last_selected
             FROM locations
             ORDER BY name
         """).fetchall()
 
-        return [
-            Location(
-                id=row[0],
-                name=row[1],
-                path=Path(row[2]),
-                last_access=(
-                    datetime.fromisoformat(row[3])
-                    if row[3] is not None
-                    else None
-                ),
-            )
-            for row in rows
-        ]
+        return [self._row_to_location(row) for row in rows]
 
     def list_recent_locations(self) -> list[Location]:
         rows = self.connection.execute("""
-            SELECT id, name, path, last_access
+            SELECT id, name, path, last_access, description, last_selected
             FROM locations
             ORDER BY
                 last_access IS NULL,
-                last_access DESC
+                last_access DESC,
+                name
         """).fetchall()
 
-        return [
-            Location(
-                id=row[0],
-                name=row[1],
-                path=Path(row[2]),
-                last_access=(
-                    datetime.fromisoformat(row[3])
-                    if row[3] is not None
-                    else None
-                ),
-            )
-            for row in rows
-        ]
+        return [self._row_to_location(row) for row in rows]
 
     def add_location(
         self,
@@ -115,7 +121,7 @@ class LaupyDB:
 
     def get_location(self, location_id: int) -> Location:
         row = self.connection.execute("""
-            SELECT id, name, path, last_access
+            SELECT id, name, path, last_access, description, last_selected
             FROM locations
             WHERE id = ?
         """, (location_id,)).fetchone()
@@ -125,20 +131,11 @@ class LaupyDB:
                 f"Location {location_id} does not exist"
             )
 
-        return Location(
-            id=row[0],
-            name=row[1],
-            path=Path(row[2]),
-            last_access=(
-                datetime.fromisoformat(row[3])
-                if row[3] is not None
-                else None
-            ),
-        )
+        return self._row_to_location(row)
 
     def get_location_by_path(self, path: Path) -> Location | None:
         row = self.connection.execute("""
-            SELECT id, name, path, last_access
+            SELECT id, name, path, last_access, description, last_selected
             FROM locations
             WHERE path = ?
         """, (str(path.resolve()),)).fetchone()
@@ -146,16 +143,21 @@ class LaupyDB:
         if row is None:
             return None
 
-        return Location(
-            id=row[0],
-            name=row[1],
-            path=Path(row[2]),
-            last_access=(
-                datetime.fromisoformat(row[3])
-                if row[3] is not None
-                else None
-            ),
-        )
+        return self._row_to_location(row)
+
+    def get_last_selected_location(self) -> Location | None:
+        row = self.connection.execute("""
+            SELECT id, name, path, last_access, description, last_selected
+            FROM locations
+            WHERE last_selected = 1
+            ORDER BY id DESC
+            LIMIT 1
+        """).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_location(row)
 
     def update_last_access(self, location_id: int):
         now = datetime.now().isoformat(timespec="seconds")
@@ -188,6 +190,43 @@ class LaupyDB:
 
         self.connection.commit()
 
+    def update_description(
+        self,
+        location_id: int,
+        description: str | None,
+    ):
+        if description is not None:
+            description = description.strip()
+
+        if description == "":
+            description = None
+
+        self.connection.execute(
+            """
+            UPDATE locations
+            SET description = ?
+            WHERE id = ?
+            """,
+            (description, location_id),
+        )
+
+        self.connection.commit()
+
+    def set_last_selected(self, location_id: int):
+        self.connection.execute(
+            "UPDATE locations SET last_selected = 0"
+        )
+        self.connection.execute(
+            """
+            UPDATE locations
+            SET last_selected = 1
+            WHERE id = ?
+            """,
+            (location_id,),
+        )
+
+        self.connection.commit()
+
     def remove_location(self, location_id: int):
         self.connection.execute(
             "DELETE FROM locations WHERE id = ?",
@@ -195,4 +234,3 @@ class LaupyDB:
         )
 
         self.connection.commit()
-
