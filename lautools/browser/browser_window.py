@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import logging
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -21,19 +22,21 @@ from PySide6.QtWidgets import (
 from project_config_dialog import ProjectConfigDialog
 from project_manager import ProjectManager
 
-import logging
-# Create a logger specific to this module
+
 log = logging.getLogger(__name__)
-log.setLevel(logging.INFO) # Set the logging level to INFO
-# Create a console handler and set its level to INFO
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-# Create a formatter and set it for the handler
-formatter = logging.Formatter('%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s', datefmt='%d.%m.%Y %H:%M:%S')
-ch.setFormatter(formatter)
-# Add the handler to the logger
-log.addHandler(ch)
-log.propagate = False # Prevent log messages from being propagated to the root logger
+log.setLevel(logging.INFO)
+
+if not log.handlers:
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
+        datefmt="%d.%m.%Y %H:%M:%S",
+    )
+    ch.setFormatter(formatter)
+    log.addHandler(ch)
+
+log.propagate = False
 
 
 class BrowserWindow(QMainWindow):
@@ -41,7 +44,7 @@ class BrowserWindow(QMainWindow):
         super().__init__()
 
         self.db = db
-        self.project_manager = ProjectManager()
+        self.project_manager = ProjectManager(self.db)
         self.current_location = None
         self.current_working_directory = None
 
@@ -91,7 +94,9 @@ class BrowserWindow(QMainWindow):
         project_menu.addSeparator()
 
         self.create_wd_action = project_menu.addAction("Create wd")
-        self.create_wd_action.triggered.connect(self.create_working_directory)
+        self.create_wd_action.triggered.connect(
+            self.create_working_directory
+        )
 
         self.create_custom_wd_action = project_menu.addAction(
             "Create wd with custom suffix..."
@@ -114,8 +119,7 @@ class BrowserWindow(QMainWindow):
             return
 
         for location in locations:
-            label = f"{location.name}"
-            action = self.switch_menu.addAction(label)
+            action = self.switch_menu.addAction(location.name)
             action.setToolTip(str(location.path))
             action.triggered.connect(
                 lambda checked=False, loc=location: self.open_recent_location(loc)
@@ -192,7 +196,6 @@ class BrowserWindow(QMainWindow):
         self.location_list.itemClicked.connect(
             self.select_working_directory
         )
-
         self.location_list.itemDoubleClicked.connect(
             self.select_working_directory
         )
@@ -269,7 +272,9 @@ class BrowserWindow(QMainWindow):
 
     def _restore_last_selected_project(self):
         if not hasattr(self.db, "get_last_selected_location"):
-            log.info("Database does not support last selected location retrieval.")
+            log.info(
+                "Database does not support last selected location retrieval."
+            )
             return
 
         location = self.db.get_last_selected_location()
@@ -278,7 +283,9 @@ class BrowserWindow(QMainWindow):
             return
 
         self.current_location = location
-        log.info(f"Restored last selected project: {self.current_location.name}")
+        log.info(
+            f"Restored last selected project: {self.current_location.name}"
+        )
         self.current_working_directory = None
         self._update_current_location_ui()
         self._load_location(location)
@@ -348,7 +355,6 @@ class BrowserWindow(QMainWindow):
         """
         Load tasks, measurements and pipeline data for `location`.
         """
-
         self.refresh_locations()
         self._reset_tab_texts()
         self._update_action_states()
@@ -357,7 +363,9 @@ class BrowserWindow(QMainWindow):
         if self.current_location is None:
             self.setWindowTitle("Laupy")
         else:
-            self.setWindowTitle(f"Laupy - {self.current_location.name}")
+            self.setWindowTitle(
+                f"Laupy - {self.current_location.name}"
+            )
 
     # ------------------------------------------------------------------
     # File actions
@@ -397,12 +405,11 @@ class BrowserWindow(QMainWindow):
         self.current_working_directory = None
 
         self.location_list.clear()
-
         self.location_status.setText("No project selected")
         self.status_label.setText("Ready")
         self.tabs.setCurrentIndex(0)
         self._reset_tab_texts()
-        self._update_action_states()
+        self._update_current_location_ui()
 
     # ------------------------------------------------------------------
     # Project actions
@@ -413,10 +420,8 @@ class BrowserWindow(QMainWindow):
             self.status_label.setText("No active project to configure")
             return
 
-        project_info = self.project_manager.build_project_info(
-            self.current_location
-        )
-        dialog = ProjectConfigDialog(project_info, refresh_callback=self._refresh_project_info_for_dialog, parent=self)
+        project_info = self.project_manager.get_project_info(self.current_location)
+        dialog = ProjectConfigDialog(self.project_manager, self.current_location, project_info, parent=self)
 
         if dialog.exec() != QDialog.Accepted:
             return
@@ -425,11 +430,13 @@ class BrowserWindow(QMainWindow):
         if new_name and new_name != self.current_location.name:
             self.db.rename_location(self.current_location.id, new_name)
 
-        if hasattr(dialog, "project_description") and hasattr(self.db, "update_description"):
+        if hasattr(dialog, "project_description") and hasattr(
+            self.db, "update_description"
+        ):
             new_description = dialog.project_description()
             self.db.update_description(
                 self.current_location.id,
-                new_description or None
+                new_description or None,
             )
 
         self.current_location = self.db.get_location(
@@ -438,18 +445,6 @@ class BrowserWindow(QMainWindow):
         self._update_current_location_ui()
         self.status_label.setText(
             f"Updated project: {self.current_location.name}"
-        )
-
-    def _refresh_project_info_for_dialog(self, progress_callback=None):
-        if self.current_location is None:
-            return None
-    
-        refreshed_location = self.db.get_location(self.current_location.id)
-        self.current_location = refreshed_location
-    
-        return self.project_manager.build_project_info(
-            refreshed_location,
-            progress_callback=progress_callback,
         )
 
     def create_working_directory(self):
@@ -513,15 +508,20 @@ class BrowserWindow(QMainWindow):
         if self.current_location is None:
             self.status_label.setText("No active project")
             return
+
         project_path = self.current_location.path
         try:
-            subprocess.Popen(["xfce4-terminal", "--working-directory", str(project_path)])
-            self.status_label.setText(f"Opened terminal in {project_path}")
+            subprocess.Popen(
+                ["xfce4-terminal", "--working-directory", str(project_path)]
+            )
+            self.status_label.setText(
+                f"Opened terminal in {project_path}"
+            )
         except Exception as e:
             QMessageBox.critical(
-            self,
-            "Cannot open terminal",
-            f"Failed to open terminal: {e}",
+                self,
+                "Cannot open terminal",
+                f"Failed to open terminal: {e}",
             )
             self.status_label.setText("Failed to open terminal")
 
@@ -541,7 +541,8 @@ class BrowserWindow(QMainWindow):
             self.status_label.setText(
                 f"Selected project: {self.current_location.name}"
             )
-            self._update_window_title()
+
+        self._update_window_title()
         self._update_action_states()
 
     def _update_action_states(self):
