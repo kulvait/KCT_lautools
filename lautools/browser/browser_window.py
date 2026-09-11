@@ -416,7 +416,7 @@ class BrowserWindow(QMainWindow):
         project_info = self.project_manager.build_project_info(
             self.current_location
         )
-        dialog = ProjectConfigDialog(project_info, self)
+        dialog = ProjectConfigDialog(project_info, refresh_callback=self._refresh_project_info_for_dialog, parent=self)
 
         if dialog.exec() != QDialog.Accepted:
             return
@@ -426,9 +426,10 @@ class BrowserWindow(QMainWindow):
             self.db.rename_location(self.current_location.id, new_name)
 
         if hasattr(dialog, "project_description") and hasattr(self.db, "update_description"):
+            new_description = dialog.project_description()
             self.db.update_description(
                 self.current_location.id,
-                dialog.project_description() or None,
+                new_description or None
             )
 
         self.current_location = self.db.get_location(
@@ -437,6 +438,18 @@ class BrowserWindow(QMainWindow):
         self._update_current_location_ui()
         self.status_label.setText(
             f"Updated project: {self.current_location.name}"
+        )
+
+    def _refresh_project_info_for_dialog(self, progress_callback=None):
+        if self.current_location is None:
+            return None
+    
+        refreshed_location = self.db.get_location(self.current_location.id)
+        self.current_location = refreshed_location
+    
+        return self.project_manager.build_project_info(
+            refreshed_location,
+            progress_callback=progress_callback,
         )
 
     def create_working_directory(self):

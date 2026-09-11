@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import json
 from pathlib import Path
 
@@ -40,13 +39,17 @@ class BeamtimeInspection:
     shared_exists: bool
     raw_subdir_count: int
     raw_subdir_samples: list[str]
-
+    raw_size_bytes: int | None = None
+    processed_size_bytes: int | None = None
+    scratch_cc_size_bytes: int | None = None
 
 @dataclass
 class ProjectInfo:
     location_id: int
     name: str
     path: Path
+    description: str | None = None
+    project_size_bytes: int | None = None
     beamtime_info: BeamtimeInfo | None = None
     inspection: BeamtimeInspection | None = None
 
@@ -55,17 +58,9 @@ class BeamtimeManager:
     """Parse and inspect PETRA beamtime directories."""
 
     def find_beamtime_root(self, project_path: Path) -> Path | None:
-        """
-        Detect paths like:
-        /asap3/petra3/gpfs/p05/2025/data/11023208/scratch_cc/kct_P05SANDSILT
-
-        and return:
-        /asap3/petra3/gpfs/p05/2025/data/11023208
-        """
         parts = project_path.resolve().parts
 
         for i in range(len(parts) - 6):
-            # expect ... /gpfs/<beamline>/<year>/data/<beamtime_id>/...
             if (
                 parts[i] == "gpfs"
                 and i + 4 < len(parts)
@@ -109,16 +104,48 @@ class BeamtimeManager:
             event_start=data.get("eventStart"),
             event_end=data.get("eventEnd"),
             generated=data.get("generated"),
-            core_path=Path(data["corePath"]) if data.get("corePath") else beamtime_root,
+            core_path=(
+                Path(data["corePath"])
+                if data.get("corePath")
+                else beamtime_root
+            ),
             applicant=applicant,
         )
 
-    def inspect_beamtime(self, beamtime_root: Path) -> BeamtimeInspection:
+    def _dir_size_bytes(
+        self,
+        path: Path,
+        progress_callback=None,
+    ) -> int | None:
+        if not path.exists() or not path.is_dir():
+            return None
+
+        total = 0
+        try:
+            if progress_callback is not None:
+                progress_callback(f"Counting size of {path}")
+
+            for item in path.rglob("*"):
+                try:
+                    if item.is_file():
+                        total += item.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            return None
+
+        return total
+
+    def inspect_beamtime(
+        self,
+        beamtime_root: Path,
+        progress_callback=None,
+    ) -> BeamtimeInspection:
         raw_dir = beamtime_root / "raw"
         processed_dir = beamtime_root / "processed"
         scratch_cc_dir = beamtime_root / "scratch_cc"
         shared_dir = beamtime_root / "shared"
-
+    
         raw_subdirs: list[str] = []
         if raw_dir.exists() and raw_dir.is_dir():
             try:
@@ -129,7 +156,7 @@ class BeamtimeManager:
                 )
             except OSError:
                 raw_subdirs = []
-
+    
         return BeamtimeInspection(
             beamtime_root=beamtime_root,
             raw_exists=raw_dir.exists(),
@@ -138,28 +165,55 @@ class BeamtimeManager:
             shared_exists=shared_dir.exists(),
             raw_subdir_count=len(raw_subdirs),
             raw_subdir_samples=raw_subdirs[:12],
+            raw_size_bytes=self._dir_size_bytes(
+                raw_dir,
+                progress_callback=progress_callback,
+            ),
+            processed_size_bytes=self._dir_size_bytes(
+                processed_dir,
+                progress_callback=progress_callback,
+            ),
+            scratch_cc_size_bytes=self._dir_size_bytes(
+                scratch_cc_dir,
+                progress_callback=progress_callback,
+            ),
         )
-
 
 class ProjectManager:
     def __init__(self):
         self.beamtime_manager = BeamtimeManager()
 
-    def build_project_info(self, location) -> ProjectInfo:
+    def build_project_info(
+        self,
+        location,
+        progress_callback=None,
+    ) -> ProjectInfo:
         path = location.path.resolve()
         beamtime_root = self.beamtime_manager.find_beamtime_root(path)
-
+    
         beamtime_info = None
         inspection = None
-
+    
+        project_size_bytes = self.beamtime_manager._dir_size_bytes(
+            path,
+            progress_callback=progress_callback,
+        )
+    
         if beamtime_root is not None:
-            beamtime_info = self.beamtime_manager.load_beamtime_info(beamtime_root)
-            inspection = self.beamtime_manager.inspect_beamtime(beamtime_root)
-
+            beamtime_info = self.beamtime_manager.load_beamtime_info(
+                beamtime_root
+            )
+            inspection = self.beamtime_manager.inspect_beamtime(
+                beamtime_root,
+                progress_callback=progress_callback,
+            )
+    
         return ProjectInfo(
             location_id=location.id,
             name=location.name,
             path=path,
+            description=getattr(location, "description", None),
+            project_size_bytes=project_size_bytes,
             beamtime_info=beamtime_info,
             inspection=inspection,
         )
