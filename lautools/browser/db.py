@@ -195,3 +195,4 @@ class LaupyDB:
         )
 
         self.connection.commit()
+

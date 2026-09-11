@@ -3,6 +3,7 @@ pyQt6 GUI for Lautools
 """
 
 import argparse
+import signal
 from pathlib import Path
 
 from platformdirs import user_data_dir
@@ -45,6 +46,7 @@ def main() -> None:
     args = parse_args()
     database_path = get_database_path(args.laupy_db)
     print(f"Using database: {database_path}")
+    signal.signal(signal.SIGINT, signal.SIG_DFL)  # Allow Ctrl+C to exit the app
     app = QApplication([])
     db = LaupyDB(database_path)
     window = BrowserWindow(db)

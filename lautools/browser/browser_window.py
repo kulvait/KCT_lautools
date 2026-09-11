@@ -2,19 +2,21 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMenu,
+    QStatusBar,
+    QSplitter,
     QTabWidget,
     QVBoxLayout,
-    QHBoxLayout,
     QWidget,
-    QSplitter,
-    QStatusBar,
 )
+
+from project_config_dialog import ProjectConfigDialog
+from project_manager import ProjectManager
 
 
 class BrowserWindow(QMainWindow):
@@ -22,6 +24,7 @@ class BrowserWindow(QMainWindow):
         super().__init__()
 
         self.db = db
+        self.project_manager = ProjectManager()
         self.current_location = None
 
         self.setWindowTitle("Laupy")
@@ -32,6 +35,7 @@ class BrowserWindow(QMainWindow):
         self._create_status_bar()
 
         self.refresh_locations()
+        self._update_action_states()
 
     # ------------------------------------------------------------------
     # Menu
@@ -50,6 +54,9 @@ class BrowserWindow(QMainWindow):
         self.close_action.setShortcut("Ctrl+W")
         self.close_action.triggered.connect(self.close_location)
 
+        self.configure_action = project_menu.addAction("&Configure...")
+        self.configure_action.triggered.connect(self.configure_project)
+
         project_menu.addSeparator()
 
         self.recent_menu = project_menu.addMenu("&Recent")
@@ -63,37 +70,31 @@ class BrowserWindow(QMainWindow):
 
     def _populate_recent_menu(self):
         self.recent_menu.clear()
-    
+
         locations = self.db.list_recent_locations() if self.db else []
-    
+
         if not locations:
             action = self.recent_menu.addAction("(No locations)")
             action.setEnabled(False)
             return
-    
+
         for location in locations:
             action = self.recent_menu.addAction(location.name)
             action.setToolTip(str(location.path))
-            # Keep the Location object associated with the action.
             action.setData(location)
-    
             action.triggered.connect(
                 lambda checked=False, loc=location: self.open_recent_location(loc)
             )
 
     def open_recent_location(self, location):
-        self.db.update_last_access(location.id)  # Update last access time in the database.
-        self.current_location = location.path
-    
-        self.location_status.setText(
-            str(location.path)
-        )
-    
-        self.status_label.setText(
-            f"Selected: {location.name}"
-        )
-    
-        self._load_location(location.path)
+        self.db.update_last_access(location.id)
+        refreshed = self.db.get_location(location.id)
+
+        self.current_location = refreshed
+        self.refresh_locations()
+        self._select_location_in_list(refreshed.id)
+        self._update_current_location_ui()
+        self._load_location(refreshed)
 
     # ------------------------------------------------------------------
     # Main UI
@@ -152,7 +153,6 @@ class BrowserWindow(QMainWindow):
 
         splitter.addWidget(right_widget)
 
-        # Give the right side more space.
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
@@ -163,7 +163,7 @@ class BrowserWindow(QMainWindow):
         )
 
         self.location_list.itemDoubleClicked.connect(
-            lambda _: self.open_location()
+            self.select_location
         )
 
     # ------------------------------------------------------------------
@@ -239,32 +239,15 @@ class BrowserWindow(QMainWindow):
     def refresh_locations(self):
         self.location_list.clear()
 
-        # Keep your existing database implementation here.
-        #
-        # Example:
-        #
-        # locations = self.db.get_locations()
-        #
-        # for location in locations:
-        #     item = QListWidgetItem(str(location))
-        #     item.setData(Qt.UserRole, location)
-        #     self.location_list.addItem(item)
-
-        locations = self._get_locations()
+        locations = self.db.list_locations()
 
         for location in locations:
             item = QListWidgetItem(f"{location.name}    {location.path}")
             item.setData(Qt.UserRole, location)
             self.location_list.addItem(item)
 
-    def _get_locations(self):
-        """
-        Adapt this method to your database API.
-        """
-        try:
-            return self.db.get_locations()
-        except AttributeError:
-            return []
+        if self.current_location is not None:
+            self._select_location_in_list(self.current_location.id)
 
     def select_location(self, item):
         location = item.data(Qt.UserRole)
@@ -272,17 +255,9 @@ class BrowserWindow(QMainWindow):
         if not location:
             return
 
-        self.current_location = Path(location)
-
-        self.location_status.setText(
-            str(self.current_location)
-        )
-
-        self.status_label.setText(
-            f"Selected: {self.current_location.name}"
-        )
-
-        self._load_location(self.current_location)
+        self.current_location = location
+        self._update_current_location_ui()
+        self._load_location(location)
 
     def _load_location(self, location):
         """
@@ -296,7 +271,7 @@ class BrowserWindow(QMainWindow):
         # self.load_measurements(location)
         # self.load_pipeline(location)
 
-        pass
+        self._update_action_states()
 
     # ------------------------------------------------------------------
     # Project actions
@@ -311,19 +286,22 @@ class BrowserWindow(QMainWindow):
         if not directory:
             return
 
-        path = Path(directory)
+        path = Path(directory).resolve()
 
         self._add_location(path)
+
+        location = self.db.get_location_by_path(path)
+        if location is None:
+            self.status_label.setText("Could not open location")
+            return
+
+        self.db.update_last_access(location.id)
+        self.current_location = self.db.get_location(location.id)
+
         self.refresh_locations()
-
-        # Select the newly opened directory.
-        for index in range(self.location_list.count()):
-            item = self.location_list.item(index)
-
-            if item.data(Qt.UserRole) == str(path):
-                self.location_list.setCurrentItem(item)
-                self.select_location(item)
-                break
+        self._select_location_in_list(self.current_location.id)
+        self._update_current_location_ui()
+        self._load_location(self.current_location)
 
     def close_location(self):
         self.current_location = None
@@ -333,34 +311,68 @@ class BrowserWindow(QMainWindow):
         self.location_status.setText(
             "No location selected"
         )
-
         self.status_label.setText("Ready")
-
-        # Reset the tabs if necessary.
         self.tabs.setCurrentIndex(0)
+        self._update_action_states()
+
+    def configure_project(self):
+        if self.current_location is None:
+            self.status_label.setText("No active project to configure")
+            return
+
+        project_info = self.project_manager.build_project_info(
+            self.current_location
+        )
+        dialog = ProjectConfigDialog(project_info, self)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        new_name = dialog.project_name()
+        if new_name and new_name != self.current_location.name:
+            self.db.rename_location(self.current_location.id, new_name)
+            self.current_location = self.db.get_location(
+                self.current_location.id
+            )
+            self.refresh_locations()
+            self._update_current_location_ui()
+            self.status_label.setText(
+                f"Renamed project to: {self.current_location.name}"
+            )
 
     def show_recent_locations(self):
-        """
-        Replace this with a dialog/menu populated from your database.
-        """
-
         self.status_label.setText(
             "Recent locations"
         )
 
-        # TODO:
-        # Show recent locations from self.db.
-
     # ------------------------------------------------------------------
-    # Database integration
+    # Helpers
     # ------------------------------------------------------------------
 
     def _add_location(self, path):
-        """
-        Adapt to your database API.
-        """
-        try:
-            self.db.add_location(str(path))
-        except AttributeError:
-            pass
- 
+        self.db.add_location(path)
+
+    def _update_current_location_ui(self):
+        if self.current_location is None:
+            self.location_status.setText("No location selected")
+            self.status_label.setText("Ready")
+        else:
+            self.location_status.setText(str(self.current_location.path))
+            self.status_label.setText(
+                f"Selected: {self.current_location.name}"
+            )
+
+        self._update_action_states()
+
+    def _update_action_states(self):
+        has_location = self.current_location is not None
+        self.close_action.setEnabled(has_location)
+        self.configure_action.setEnabled(has_location)
+
+    def _select_location_in_list(self, location_id: int):
+        for index in range(self.location_list.count()):
+            item = self.location_list.item(index)
+            location = item.data(Qt.UserRole)
+            if location and location.id == location_id:
+                self.location_list.setCurrentItem(item)
+                return
