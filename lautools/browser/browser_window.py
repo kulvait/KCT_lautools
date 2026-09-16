@@ -179,10 +179,12 @@ class BrowserWindow(QMainWindow):
         self.tasks_tab = self._create_tasks_tab()
         self.measurements_tab = self._create_measurements_tab()
         self.pipeline_tab = self._create_pipeline_tab()
+        self.status_tab = self._create_status_tab()
 
         self.tabs.addTab(self.tasks_tab, "Tasks")
         self.tabs.addTab(self.measurements_tab, "Measurements")
         self.tabs.addTab(self.pipeline_tab, "Pipeline")
+        self.tabs.addTab(self.status_tab, "Status")
 
         right_layout.addWidget(self.tabs)
 
@@ -250,6 +252,19 @@ class BrowserWindow(QMainWindow):
         layout.addWidget(self.pipeline_label)
         layout.addStretch()
 
+        return widget
+
+    def _create_status_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        self.status_tab_label = QLabel(
+            "Status\n\n"
+            "Status information for the selected working directory "
+            "will appear here."
+        )
+        self.status_tab_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        layout.addWidget(self.status_tab_label)
+        layout.addStretch()
         return widget
 
     # ------------------------------------------------------------------
