@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from project_config_dialog import ProjectConfigDialog
 from project_manager import ProjectManager
-
+from pipeline_tree_widget import PipelineTreeWidget
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -241,32 +241,23 @@ class BrowserWindow(QMainWindow):
     def _create_pipeline_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-
-        self.pipeline_label = QLabel(
+        self.pipeline_tab_label = QLabel(
             "Pipeline\n\n"
-            "The processing pipeline for the selected working "
-            "directory will appear here."
+            "Pipeline information for the selected working directory "
+            "will appear here."
         )
-        self.pipeline_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-
-        layout.addWidget(self.pipeline_label)
+        self.pipeline_tab_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        layout.addWidget(self.pipeline_tab_label)
         layout.addStretch()
-
         return widget
 
     def _create_status_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        self.status_tab_label = QLabel(
-            "Status\n\n"
-            "Status information for the selected working directory "
-            "will appear here."
-        )
-        self.status_tab_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        layout.addWidget(self.status_tab_label)
-        layout.addStretch()
+        self.pipeline_status_tree = PipelineTreeWidget()
+        layout.addWidget(self.pipeline_status_tree)
         return widget
-
+        
     # ------------------------------------------------------------------
     # Status bar
     # ------------------------------------------------------------------
@@ -362,9 +353,8 @@ class BrowserWindow(QMainWindow):
         self.measurements_label.setText(
             f"Measurements\n\nSelected working directory:\n{working_dir}"
         )
-        self.pipeline_label.setText(
-            f"Pipeline\n\nSelected working directory:\n{working_dir}"
-        )
+        # Load pipeline for this working directory
+        self.pipeline_status_tree.set_working_directory(working_dir)
 
     def _load_location(self, location):
         """
@@ -579,8 +569,4 @@ class BrowserWindow(QMainWindow):
             "Measurements for the selected working directory "
             "will appear here."
         )
-        self.pipeline_label.setText(
-            "Pipeline\n\n"
-            "The processing pipeline for the selected working "
-            "directory will appear here."
-        )
+        self.pipeline_status_tree.clear()

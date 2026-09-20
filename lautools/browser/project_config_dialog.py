@@ -71,7 +71,7 @@ class ProjectConfigDialog(QDialog):
         self.refresh_worker = None
 
         self.setWindowTitle("Configure Project")
-        self.resize(780, 700)
+        self.resize(780, 900)
 
         layout = QVBoxLayout(self)
 
@@ -155,7 +155,7 @@ class ProjectConfigDialog(QDialog):
 
         self.applicant_widget = QPlainTextEdit()
         self.applicant_widget.setReadOnly(True)
-        self.applicant_widget.setMaximumHeight(110)
+        self.applicant_widget.setMaximumHeight(150)
 
         form.addRow("Beamtime ID:", self.beamtime_id_label)
         form.addRow("Beamline:", self.beamline_label)
