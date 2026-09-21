@@ -40,6 +40,33 @@ class PipelineManager:
         """
         self.working_dir = Path(working_dir)
 
+    def _get_execution_unit_dirs(self) -> List[Path]:
+        """Return child directories that contain a pipeline directory.
+
+        A browser working directory corresponds to the ``-w/--working-dir``
+        argument of ``laupy/scripts/pipeline.py``.  Each immediate child is
+        therefore an execution unit whose DAG is stored in:
+
+            <working_dir>/<execution_unit>/pipeline/dag.json
+        """
+        try:
+            return sorted(
+                (
+                    child.resolve()
+                    for child in self.working_dir.iterdir()
+                    if child.is_dir() and (child / "pipeline").is_dir()
+                ),
+                key=lambda path: path.name.lower(),
+            )
+        except OSError as exc:
+            log.warning(
+                "Cannot enumerate pipeline directories below %s: %s",
+                self.working_dir,
+                exc,
+            )
+            return []
+
+
     def get_pipeline_entries(
         self,
         show_completed: bool = False,
@@ -68,26 +95,64 @@ class PipelineManager:
         List[Dict[str, Any]]
             Filtered DAG entries with populated slurm_info
         """
-        # Load DAG from pipeline/dag.json
-        dag = load_dag(str(self.working_dir))
-        
-        # Update SLURM info if requested
-        if update_slurm_info:
-            update_dag_entries(
-                dag,
-                update_retired=show_retired,
-                update_negative_step=False,
-                filter_terminal_states=True
-            )
-        
-        # Apply UI filters
-        filtered = dag
-        
+        entries: List[Dict[str, Any]] = []
+        # Mirror `laupy pipeline status`: each child of the selected working
+        # directory is an execution unit with its own pipeline/dag.json.
+        for execution_unit_dir in self._get_execution_unit_dirs():
+            try:
+                dag = load_dag(str(execution_unit_dir))
+            except (OSError, ValueError) as exc:
+                log.warning(
+                    "Cannot load DAG from %s: %s",
+                    execution_unit_dir,
+                    exc,
+                )
+                continue
+
+            if update_slurm_info and dag:
+                try:
+                    update_dag_entries(
+                        dag,
+                        # Include retired entries in the SLURM refresh only
+                        # when the corresponding UI filter asks for them.
+                        update_retired=show_retired,
+                        update_negative_step=False,
+                        # Same status-refresh behaviour as the CLI command:
+                        # do not re-query cached terminal jobs.
+                        filter_terminal_states=True,
+                    )
+                except Exception:
+                    # One unavailable Slurm query must not hide status from
+                    # other execution units.
+                    log.exception(
+                        "Cannot update SLURM status for %s",
+                        execution_unit_dir,
+                    )
+
+            for dag_entry in dag:
+                # Do not mutate the DAG object loaded from disk.  The source
+                # fields let the widget distinguish identical steps/jobs from
+                # separate execution units.
+                entry = dict(dag_entry)
+                entry["execution_unit_dir"] = execution_unit_dir
+                entry["execution_unit_name"] = execution_unit_dir.name
+                entry["execution_unit_relative"] = str(
+                    execution_unit_dir.relative_to(self.working_dir)
+                )
+                entries.append(entry)
+
         if not show_retired:
-            filtered = [e for e in filtered if not e.get("retired", False)]
-        
+            entries = [
+                entry
+                for entry in entries
+                if not entry.get("retired", False)
+            ]
+
         if not show_completed:
-            filtered = [e for e in filtered 
-                       if e.get("slurm_info", {}).get("State") != "COMPLETED"]
-        
-        return filtered
+            entries = [
+                entry
+                for entry in entries
+                if entry.get("slurm_info", {}).get("State") != "COMPLETED"
+            ]
+
+        return entries

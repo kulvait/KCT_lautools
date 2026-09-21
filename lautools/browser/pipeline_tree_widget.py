@@ -24,6 +24,20 @@ from PySide6.QtGui import QColor
 from pipeline_manager import PipelineManager
 
 log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+
+if not log.handlers:
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
+        datefmt="%d.%m.%Y %H:%M:%S",
+    )
+    ch.setFormatter(formatter)
+    log.addHandler(ch)
+
+log.propagate = False
+
 
 # Color mapping for job states
 STATE_COLORS = {
@@ -96,8 +110,9 @@ class PipelineTreeWidget(QWidget):
         
         # Tree widget
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(5)
+        self.tree.setColumnCount(6)
         self.tree.setHeaderLabels([
+            "Execution Unit",
             "Step",
             "Job ID",
             "Name",
@@ -105,10 +120,11 @@ class PipelineTreeWidget(QWidget):
             "Details"
         ])
         self.tree.setColumnWidth(0, 50)
-        self.tree.setColumnWidth(1, 80)
-        self.tree.setColumnWidth(2, 120)
-        self.tree.setColumnWidth(3, 100)
-        self.tree.setColumnWidth(4, 300)
+        self.tree.setColumnWidth(1, 50)
+        self.tree.setColumnWidth(2, 80)
+        self.tree.setColumnWidth(3, 120)
+        self.tree.setColumnWidth(4, 100)
+        self.tree.setColumnWidth(5, 300)
         
         layout.addWidget(self.tree)
         
@@ -194,6 +210,8 @@ class PipelineTreeWidget(QWidget):
     
     def _create_entry_item(self, entry: Dict[str, Any]) -> QTreeWidgetItem:
         """Create a tree item for a pipeline entry."""
+        execution_unit = entry.get("execution_unit_name", "N/A")
+        execution_unit_dir = entry.get("execution_unit_dir", "N/A")
         step = entry.get("step", "N/A")
         job_id = entry.get("job_id", "N/A")
         slurm_info = entry.get("slurm_info", {})
@@ -201,6 +219,7 @@ class PipelineTreeWidget(QWidget):
         job_state = slurm_info.get("State", "UNKNOWN")
         
         item = QTreeWidgetItem([
+            str(execution_unit),
             str(step),
             str(job_id),
             job_name,
@@ -214,13 +233,19 @@ class PipelineTreeWidget(QWidget):
         color.setAlpha(100)
         for col in range(item.columnCount()):
             item.setBackground(col, color)
-        
+
+        #Add execution unit directory as a tooltip and sub-item
+        if execution_unit is not None:
+            item.setToolTip(0, str(execution_unit_dir))
+            execution_unit_item = QTreeWidgetItem(["Execution dir", str(execution_unit)])
+            item.addChild(execution_unit_item)
+
         # Add sub-items for more details
         if job_state == "PENDING":
             reason = slurm_info.get("Reason", "N/A")
             if reason and reason not in ("N/A", "None", ""):
                 reason_item = QTreeWidgetItem(
-                    ["", "", "", "Reason", reason]
+                    ["", "", "", "", "Reason", reason]
                 )
                 item.addChild(reason_item)
         elif job_state == "RUNNING":
@@ -229,13 +254,13 @@ class PipelineTreeWidget(QWidget):
             node_list = slurm_info.get("NodeList", "N/A")
             
             elapsed_item = QTreeWidgetItem(
-                ["", "", "", "Elapsed", elapsed]
+                ["", "", "", "", "Elapsed", elapsed]
             )
             limit_item = QTreeWidgetItem(
-                ["", "", "", "Time Limit", time_limit]
+                ["", "", "", "", "Time Limit", time_limit]
             )
             nodes_item = QTreeWidgetItem(
-                ["", "", "", "Nodes", node_list]
+                ["", "", "", "", "Nodes", node_list]
             )
             item.addChild(elapsed_item)
             item.addChild(limit_item)
@@ -246,14 +271,14 @@ class PipelineTreeWidget(QWidget):
         if dependencies:
             deps_str = ", ".join(str(d) for d in dependencies)
             deps_item = QTreeWidgetItem(
-                ["", "", "", "Dependencies", deps_str]
+                ["", "", "", "", "Dependencies", deps_str]
             )
             item.addChild(deps_item)
         
         # Mark if retired
         if entry.get("retired", False):
             retired_item = QTreeWidgetItem(
-                ["", "", "", "Status", "RETIRED"]
+                ["", "", "", "", "Status", "RETIRED"]
             )
             item.addChild(retired_item)
         
