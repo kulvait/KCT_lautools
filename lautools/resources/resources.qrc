@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE RCC>
+
+<!--
+    Qt resource collection for the PySide6 application.
+
+    This file embeds application resources into a Python module
+    generated with pyside6-rcc. e.g. pyside6-rcc resources/resources.qrc -o resources_pyside.py
+-->
+<RCC version="1.0">
+    <qresource prefix="/resources">
+        <file>kct_logo.svg</file>
+    </qresource>
+</RCC>
