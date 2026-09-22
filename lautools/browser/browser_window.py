@@ -2,6 +2,8 @@ from pathlib import Path
 import subprocess
 import logging
 
+from lautools import resources_pyside
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -185,6 +187,8 @@ class BrowserWindow(QMainWindow):
         self.tabs.addTab(self.measurements_tab, "Measurements")
         self.tabs.addTab(self.pipeline_tab, "Pipeline")
         self.tabs.addTab(self.status_tab, "Status")
+        # make Status first opened tab
+        self.tabs.setCurrentWidget(self.status_tab)
 
         right_layout.addWidget(self.tabs)
 

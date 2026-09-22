@@ -4,11 +4,12 @@ Accepts configuration from other widgets.
 """
 
 from pathlib import Path
+import subprocess
 from typing import Any, Dict, List, Optional
 
 import logging
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QProcess
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -18,6 +19,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QCheckBox,
+    QMenu,
+    QMessageBox,
 )
 from PySide6.QtGui import QColor
 
@@ -125,6 +128,8 @@ class PipelineTreeWidget(QWidget):
         self.tree.setColumnWidth(3, 120)
         self.tree.setColumnWidth(4, 100)
         self.tree.setColumnWidth(5, 300)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         
         layout.addWidget(self.tree)
         
@@ -217,6 +222,8 @@ class PipelineTreeWidget(QWidget):
         slurm_info = entry.get("slurm_info", {})
         job_name = slurm_info.get("JobName", "N/A")
         job_state = slurm_info.get("State", "UNKNOWN")
+        stdout_file = slurm_info.get("StdOut", None)
+        stderr_file = slurm_info.get("StdErr", None)
         
         item = QTreeWidgetItem([
             str(execution_unit),
@@ -237,8 +244,17 @@ class PipelineTreeWidget(QWidget):
         #Add execution unit directory as a tooltip and sub-item
         if execution_unit is not None:
             item.setToolTip(0, str(execution_unit_dir))
-            execution_unit_item = QTreeWidgetItem(["Execution dir", str(execution_unit)])
+            execution_unit_item = QTreeWidgetItem(["", "", "Execution dir", str(execution_unit)])
             item.addChild(execution_unit_item)
+
+        # If stdout and stderr files are present, add right click context menu to open them
+        if stdout_file:
+            stdout_item = QTreeWidgetItem(["", "", "StdOut", str(stdout_file)])
+            item.addChild(stdout_item)
+            
+        if stderr_file:
+            stderr_item = QTreeWidgetItem(["", "", "StdErr", str(stderr_file)])
+            item.addChild(stderr_item)
 
         # Add sub-items for more details
         if job_state == "PENDING":
@@ -281,8 +297,72 @@ class PipelineTreeWidget(QWidget):
                 ["", "", "", "", "Status", "RETIRED"]
             )
             item.addChild(retired_item)
-        
+
+        item.setData(0, Qt.UserRole, entry)  # Store the entry data for context menu actions
         return item
+
+    def _show_tree_context_menu(self, position):
+        """Show actions for opening the selected job's SLURM log files."""
+        item = self.tree.itemAt(position)
+        if item is None:
+            return
+        # Detail rows are children of a pipeline-entry item.
+        while item.parent() is not None:
+            item = item.parent()
+
+        entry = item.data(0, Qt.UserRole)
+        if not isinstance(entry, dict):
+            return
+        
+        slurm_info = entry.get("slurm_info", {})
+        job_name = slurm_info.get("JobName", "N/A")
+        job_state = slurm_info.get("State", "UNKNOWN")
+        unit_dir = entry.get("execution_unit_dir", None)
+        stdout_file = slurm_info.get("StdOut", None)
+        stdout_basename = Path(stdout_file).name if stdout_file else None
+        stderr_file = slurm_info.get("StdErr", None)
+        stderr_basename = Path(stderr_file).name if stderr_file else None
+        menu = QMenu(self)
+        log.info(f"Context menu for job {job_name} (ID: {entry.get('job_id', 'N/A')}) with state {job_state} stdout: {stdout_file}, stderr: {stderr_file}")
+        if stdout_file is not None and stderr_file is not None:
+            menu.addAction("Open Both StdOut and StdErr", lambda: (self._open_files_mousepad(entry, [stdout_file, stderr_file])))
+        if stdout_file is not None:
+            menu.addAction(f"StdOut: {stdout_basename}", lambda: self._open_files_mousepad(entry, [stdout_file]))
+        if stderr_file is not None:
+            menu.addAction(f"StdErr: {stderr_basename}", lambda: self._open_files_mousepad(entry, [stderr_file]))
+        if menu.actions():
+            menu.addSeparator()
+        if unit_dir is not None:
+            menu.addAction("Open Terminal Here", lambda: self._open_terminal(Path(unit_dir)))
+        # If there are added actions, show the menu
+        if menu.actions():
+            menu.exec(self.tree.viewport().mapToGlobal(position))
+
+    def _open_files_mousepad(self, entry: Dict[str, Any], files: List[str]):
+        """Open files in mousepad"""
+        if files is None or len(files) == 0:
+            return
+        if not QProcess.startDetached("mousepad", files):
+            QMessageBox.warning(self, "Cannot open log file", f"Could not start xdg-open for:\n{log_path}",)
+    
+    def _open_terminal(self, directory):
+        """Open a terminal in the current working directory or specified directory."""
+        if directory is None:
+            return
+        if not directory.exists() or not directory.is_dir():
+            QMessageBox.warning(self, "Invalid directory {directory}", f"Cannot open terminal in {directory}: Not a valid directory.",)
+            return
+        try:
+            subprocess.Popen(
+                ["xfce4-terminal", "--working-directory", str(directory)]
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Cannot open terminal",
+                f"Failed to open terminal: {e}",
+            )
+            self.status_label.setText("Failed to open terminal")
     
     def _format_details(self, entry: Dict[str, Any]) -> str:
         """Format details string based on job state."""

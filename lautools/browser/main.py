@@ -9,6 +9,7 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QIcon
 
 from db import LaupyDB
 from browser_window import BrowserWindow
@@ -93,6 +94,8 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     app = QApplication([])
+    app_icon = QIcon(":/kct_logo.svg")
+    app.setWindowIcon(app_icon)
     db = LaupyDB(database_path)
     window = BrowserWindow(db)
     window.show()
