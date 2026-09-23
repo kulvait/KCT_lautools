@@ -6,7 +6,8 @@ Accepts configuration from other widgets.
 from pathlib import Path
 import subprocess
 from typing import Any, Dict, List, Optional
-
+import shlex
+import os
 import logging
 
 from PySide6.QtCore import Qt, QTimer, QProcess, QThread, QObject, Signal
@@ -198,6 +199,7 @@ class PipelineTreeWidget(QWidget):
     def set_working_directory(self, working_dir: Path):
         """Set the working directory to load pipeline from."""
         self.current_working_dir = Path(working_dir)
+        self.global_working_dir = self.current_working_dir.parent
         self.pipeline_manager = PipelineManager(self.current_working_dir)
         self.refresh()
     
@@ -428,6 +430,10 @@ class PipelineTreeWidget(QWidget):
         stdout_basename = Path(stdout_file).name if stdout_file else None
         stderr_file = slurm_info.get("StdErr", None)
         stderr_basename = Path(stderr_file).name if stderr_file else None
+        scriptname = entry.get("script_name", None)
+        script_path = self.global_working_dir / "sbatch" / scriptname if scriptname else None
+        script_path = script_path.resolve() if script_path else None
+        log.info(f"script_path: {script_path}, scriptname: {scriptname}, global_working_dir: {self.global_working_dir}")
         menu = QMenu(self)
         #log.info(f"Context menu for job {job_name} (ID: {entry.get('job_id', 'N/A')}) with state {job_state} stdout: {stdout_file}, stderr: {stderr_file}")
         if stdout_file is not None and stderr_file is not None:
@@ -440,6 +446,14 @@ class PipelineTreeWidget(QWidget):
             menu.addSeparator()
         if unit_dir is not None:
             menu.addAction("Open Terminal Here", lambda: self._open_terminal(Path(unit_dir)))
+        if menu.actions():
+            menu.addSeparator()
+        if job_state in ("RUNNING", "PENDING"):
+            menu.addAction("Cancel Job", lambda: self._cancel_job(entry))
+        if job_state in ("FAILED", "CANCELLED", "TIMEOUT"):
+            menu.addAction("Retire Job", lambda: self._requeue_job(entry))
+        if script_path is not None and script_path.exists():
+            menu.addAction("Open %s" % scriptname, lambda: self._open_files_vim(entry, [str(script_path)]))
         # If there are added actions, show the menu
         if menu.actions():
             menu.exec(self.tree.viewport().mapToGlobal(position))
@@ -451,6 +465,18 @@ class PipelineTreeWidget(QWidget):
         if not QProcess.startDetached("mousepad", files):
             QMessageBox.warning(self, "Cannot open log file", f"Could not start xdg-open for:\n{log_path}",)
     
+    def _open_files_vim(self, entry: Dict[str, Any], files: List[str]):
+        """Open files in mousepad"""
+        directory = self.global_working_dir if self.global_working_dir else Path.cwd()
+        if files is None or len(files) == 0:
+            return
+        elif len(files) == 1:
+            directory = Path(files[0]).parent
+        try:
+            subprocess.Popen(["xfce4-terminal", "--working-directory", str(directory), "--command", f"vim {' '.join(map(shlex.quote, files))}"])
+        except Exception as e:
+            QMessageBox.critical(self, "Cannot open file in vim", f"Failed to open file in vim: {e}",)
+    
     def _open_terminal(self, directory):
         """Open a terminal in the current working directory or specified directory."""
         if directory is None:
@@ -459,15 +485,9 @@ class PipelineTreeWidget(QWidget):
             QMessageBox.warning(self, "Invalid directory {directory}", f"Cannot open terminal in {directory}: Not a valid directory.",)
             return
         try:
-            subprocess.Popen(
-                ["xfce4-terminal", "--working-directory", str(directory)]
-            )
+            subprocess.Popen(["xfce4-terminal", "--working-directory", str(directory)])
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Cannot open terminal",
-                f"Failed to open terminal: {e}",
-            )
+            QMessageBox.critical(self, "Cannot open terminal", f"Failed to open terminal in {directory}: {e}",)
             self.status_label.setText("Failed to open terminal")
     
     def _format_details(self, entry: Dict[str, Any]) -> str:
