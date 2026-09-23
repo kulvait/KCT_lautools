@@ -119,8 +119,8 @@ class PipelineManager:
         List[Dict[str, Any]]
             Filtered DAG entries with populated slurm_info
         """
-        if self.LAST_DAG_FETCH is None:
-            self.fetch_dag_entries()
+        # Fetch DAG entries from disk and update SLURM info
+        self.fetch_dag_entries()
         # Mirror `laupy pipeline status`: each child of the selected working
         # directory is an execution unit with its own pipeline/dag.json.
         try:

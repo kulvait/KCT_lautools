@@ -14,6 +14,8 @@ from PySide6.QtGui import QIcon
 from db import LaupyDB
 from browser_window import BrowserWindow
 
+from lautools import resources_pyside 
+
 
 APP_NAME = "laupy Browser"
 DEFAULT_DATABASE_NAME = "laupy_beamtimes.sqlite"
@@ -94,7 +96,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     app = QApplication([])
-    app_icon = QIcon(":/kct_logo.svg")
+    app_icon = QIcon(":/resources/kct_logo.svg")
     app.setWindowIcon(app_icon)
     db = LaupyDB(database_path)
     window = BrowserWindow(db)

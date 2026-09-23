@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import logging
 
-from PySide6.QtCore import Qt, QTimer, QProcess
+from PySide6.QtCore import Qt, QTimer, QProcess, QThread, QObject, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -54,6 +54,42 @@ STATE_COLORS = {
     "COMPLETING": QColor(255, 165, 0),   # Orange
 }
 
+# Colors used for the busy/status indicator bar
+STATUS_BAR_COLORS = {
+    "idle": "#4CAF50",      # Green
+    "running": "#2196F3",   # Blue
+    "error": "#F44336",     # Red
+}
+
+
+class _PipelineRefreshWorker(QObject):
+    """
+    Worker executed on a background QThread that fetches pipeline entries
+    via PipelineManager without blocking the UI thread.
+    """
+
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, pipeline_manager: PipelineManager, show_completed: bool,
+                 show_retired: bool, update_slurm_info: bool):
+        super().__init__()
+        self.pipeline_manager = pipeline_manager
+        self.show_completed = show_completed
+        self.show_retired = show_retired
+        self.update_slurm_info = update_slurm_info
+
+    def run(self):
+        try:
+            entries = self.pipeline_manager.get_pipeline_entries(
+                show_completed=self.show_completed,
+                show_retired=self.show_retired,
+                update_slurm_info=self.update_slurm_info,
+            )
+            self.finished.emit(entries)
+        except Exception as e:
+            self.error.emit(str(e))
+
 
 class PipelineTreeWidget(QWidget):
     """
@@ -76,6 +112,11 @@ class PipelineTreeWidget(QWidget):
             "show_retired": False,
             "update_slurm_info": True,
         }
+
+        # Background refresh bookkeeping
+        self._refresh_thread: Optional[QThread] = None
+        self._refresh_worker: Optional[_PipelineRefreshWorker] = None
+        self._refresh_pending = False  # coalesce refresh() calls while running
         
         self._setup_ui()
         
@@ -95,8 +136,8 @@ class PipelineTreeWidget(QWidget):
         self.show_retired_check = QCheckBox("Show Retired")
         self.show_retired_check.stateChanged.connect(self._on_show_retired_changed)
         
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.clicked.connect(self.refresh)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh)
         
         auto_refresh_btn = QPushButton("Auto Refresh (5s)")
         auto_refresh_btn.clicked.connect(self._toggle_auto_refresh)
@@ -106,7 +147,16 @@ class PipelineTreeWidget(QWidget):
         toolbar_layout.addWidget(self.show_completed_check)
         toolbar_layout.addWidget(self.show_retired_check)
         toolbar_layout.addStretch()
-        toolbar_layout.addWidget(refresh_btn)
+
+        # Status/busy indicator bar (colored QLabel used as a small LED-like bar)
+        self.status_bar = QLabel()
+        self.status_bar.setFixedWidth(90)
+        self.status_bar.setFixedHeight(20)
+        self.status_bar.setAlignment(Qt.AlignCenter)
+        self._set_status_bar("idle", "Idle")
+        toolbar_layout.addWidget(self.status_bar)
+
+        toolbar_layout.addWidget(self.refresh_btn)
         toolbar_layout.addWidget(auto_refresh_btn)
         
         layout.addLayout(toolbar_layout)
@@ -136,6 +186,14 @@ class PipelineTreeWidget(QWidget):
         # Status label
         self.status_label = QLabel("No pipeline loaded")
         layout.addWidget(self.status_label)
+
+    def _set_status_bar(self, state: str, text: str):
+        """Update the colored status bar (idle=green, running=blue, error=red)."""
+        color = STATUS_BAR_COLORS.get(state, STATUS_BAR_COLORS["idle"])
+        self.status_bar.setText(text)
+        self.status_bar.setStyleSheet(
+            f"background-color: {color}; color: white; border-radius: 4px; font-weight: bold;"
+        )
         
     def set_working_directory(self, working_dir: Path):
         """Set the working directory to load pipeline from."""
@@ -174,26 +232,74 @@ class PipelineTreeWidget(QWidget):
         self.refresh()
     
     def refresh(self):
-        """Refresh the tree with current pipeline status."""
+        """
+        Refresh the tree with current pipeline status.
+
+        The actual (potentially slow) data fetch runs on a background
+        QThread so the UI stays responsive. If a refresh is already in
+        flight, this schedules one more refresh to run right after it
+        finishes instead of starting overlapping threads.
+        """
         if self.pipeline_manager is None:
             self.status_label.setText("No working directory selected")
             return
-        
-        try:
-            entries = self.pipeline_manager.get_pipeline_entries(
-                show_completed=self.config["show_completed"],
-                show_retired=self.config["show_retired"],
-                update_slurm_info=self.config["update_slurm_info"],
-            )
-            
-            self._populate_tree(entries)
-            self.status_label.setText(
-                f"Loaded {len(entries)} pipeline entries from "
-                f"{self.current_working_dir.name}"
-            )
-        except Exception as e:
-            self.status_label.setText(f"Error loading pipeline: {e}")
-            log.error(f"Error refreshing pipeline: {e}")
+
+        if self._refresh_thread is not None and self._refresh_thread.isRunning():
+            # A refresh is already running; remember to run again once done.
+            self._refresh_pending = True
+            return
+
+        self._start_refresh_thread()
+
+    def _start_refresh_thread(self):
+        self._refresh_pending = False
+        self._set_status_bar("running", "Refreshing…")
+        self.refresh_btn.setEnabled(False)
+
+        thread = QThread(self)
+        worker = _PipelineRefreshWorker(
+            self.pipeline_manager,
+            self.config["show_completed"],
+            self.config["show_retired"],
+            self.config["update_slurm_info"],
+        )
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_refresh_finished)
+        worker.error.connect(self._on_refresh_error)
+        # Make sure the thread quits and objects are cleaned up either way.
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(self._on_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+
+        self._refresh_thread = thread
+        self._refresh_worker = worker
+        thread.start()
+
+    def _on_thread_finished(self):
+        self._refresh_thread = None
+        self._refresh_worker = None
+        self.refresh_btn.setEnabled(True)
+        if self._refresh_pending:
+            # Another refresh was requested while this one was running.
+            self._start_refresh_thread()
+
+    def _on_refresh_finished(self, entries: List[Dict[str, Any]]):
+        self._populate_tree(entries)
+        self.status_label.setText(
+            f"Loaded {len(entries)} pipeline entries from "
+            f"{self.current_working_dir.name}"
+        )
+        self._set_status_bar("idle", "Idle")
+
+    def _on_refresh_error(self, message: str):
+        self.status_label.setText(f"Error loading pipeline: {message}")
+        log.error(f"Error refreshing pipeline: {message}")
+        self._set_status_bar("error", "Error")
     
     def _populate_tree(self, entries: List[Dict[str, Any]]):
         """Populate the tree widget with entries."""
@@ -323,7 +429,7 @@ class PipelineTreeWidget(QWidget):
         stderr_file = slurm_info.get("StdErr", None)
         stderr_basename = Path(stderr_file).name if stderr_file else None
         menu = QMenu(self)
-        log.info(f"Context menu for job {job_name} (ID: {entry.get('job_id', 'N/A')}) with state {job_state} stdout: {stdout_file}, stderr: {stderr_file}")
+        #log.info(f"Context menu for job {job_name} (ID: {entry.get('job_id', 'N/A')}) with state {job_state} stdout: {stdout_file}, stderr: {stderr_file}")
         if stdout_file is not None and stderr_file is not None:
             menu.addAction("Open Both StdOut and StdErr", lambda: (self._open_files_mousepad(entry, [stdout_file, stderr_file])))
         if stdout_file is not None:
@@ -404,3 +510,4 @@ class PipelineTreeWidget(QWidget):
         self.status_label.setText("No working directory selected")
         self.refresh_timer.stop()
         self.auto_refresh_btn.setText("Auto Refresh (5s)")
+        self._set_status_bar("idle", "Idle")
