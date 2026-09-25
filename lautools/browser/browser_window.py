@@ -5,6 +5,7 @@ import logging
 from lautools import resources_pyside
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -68,33 +69,26 @@ class BrowserWindow(QMainWindow):
 
     def _create_menu(self):
         menu_bar = self.menuBar()
-
+        # File menu
         file_menu = menu_bar.addMenu("&File")
-
         self.open_action = file_menu.addAction("Open Project...")
         self.open_action.setShortcut("Ctrl+O")
         self.open_action.triggered.connect(self.open_location)
-
         self.close_action = file_menu.addAction("Close Project")
         self.close_action.setShortcut("Ctrl+W")
         self.close_action.triggered.connect(self.close_location)
-
         file_menu.addSeparator()
-
         self.exit_action = file_menu.addAction("Exit App")
         self.exit_action.setShortcut("Ctrl+Q")
         self.exit_action.triggered.connect(self.close)
 
+        # Project menu
         project_menu = menu_bar.addMenu("&Project")
-
         self.configure_action = project_menu.addAction("Configure...")
         self.configure_action.triggered.connect(self.configure_project)
-
         self.open_terminal_action = project_menu.addAction("Open Terminal")
         self.open_terminal_action.triggered.connect(self.open_terminal)
-
         project_menu.addSeparator()
-
         self.create_wd_action = project_menu.addAction("Create wd")
         self.create_wd_action.triggered.connect(
             self.create_working_directory
@@ -107,8 +101,12 @@ class BrowserWindow(QMainWindow):
             self.create_working_directory_with_suffix
         )
 
+        # Switch menu
         self.switch_menu = menu_bar.addMenu("&Switch")
         self.switch_menu.aboutToShow.connect(self._populate_switch_menu)
+        # Workspace menu
+        self.workspace_menu = menu_bar.addMenu("&Workspace")
+        self.workspace_menu.aboutToShow.connect(self._populate_workspace_menu)
 
     def _populate_switch_menu(self):
         self.switch_menu.clear()
@@ -126,6 +124,52 @@ class BrowserWindow(QMainWindow):
             action.triggered.connect(
                 lambda checked=False, loc=location: self.open_recent_location(loc)
             )
+
+    def _list_working_directories(self):
+        if self.current_location is None:
+            return []
+        try:
+            return sorted(
+                (e for e in self.current_location.path.iterdir()
+                 if e.is_dir() and e.name.startswith("wd")),
+                key=lambda p: p.name,
+            )
+        except OSError as exc:
+            self.status_label.setText(f"Cannot list working directories: {exc}")
+            return []
+
+    def _populate_workspace_menu(self):
+        self.workspace_menu.clear()
+        if self.current_location is None:
+            a = self.workspace_menu.addAction("(No project selected)")
+            a.setEnabled(False)
+            return
+        working_dirs = self._list_working_directories()
+        if not working_dirs:
+            a = self.workspace_menu.addAction("(No wd* directories)")
+            a.setEnabled(False)
+        else:
+            group = QActionGroup(self.workspace_menu)
+            group.setExclusive(True)
+            for wd in working_dirs:
+                a = self.workspace_menu.addAction(wd.name)
+                a.setCheckable(True)
+                a.setChecked(
+                    self.current_working_directory is not None
+                    and wd == self.current_working_directory
+                )
+                a.setToolTip(str(wd))
+                group.addAction(a)
+                a.triggered.connect(
+                    lambda checked=False, p=wd: self.select_working_directory(p)
+                )
+
+        self.workspace_menu.addSeparator()
+        if "wd" not in [wd.name for wd in working_dirs]:
+            create_wd_action = self.workspace_menu.addAction("Create wd")
+            create_wd_action.triggered.connect(self.create_working_directory)
+        create_custom_wd_action = self.workspace_menu.addAction("Create wd with custom suffix...")
+        create_custom_wd_action.triggered.connect(self.create_working_directory_with_suffix)
 
     def open_recent_location(self, location):
         self.db.update_last_access(location.id)
@@ -158,12 +202,13 @@ class BrowserWindow(QMainWindow):
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
-        left_title = QLabel("Working directories")
-        left_title.setStyleSheet(
-            "font-weight: bold; padding: 4px;"
-        )
-
-        left_layout.addWidget(left_title)
+        self.left_title = QLabel()
+        if self.current_working_directory is not None:
+            self.left_title.setText(f"Subdirectories of {self.current_working_directory.name}")
+        else:
+            self.left_title.setText("No working directory selected")
+        self.left_title.setStyleSheet("font-weight: bold; padding: 4px;")
+        left_layout.addWidget(self.left_title)
 
         self.location_list = QListWidget()
         self.location_list.setMinimumWidth(250)
@@ -199,12 +244,8 @@ class BrowserWindow(QMainWindow):
 
         main_layout.addWidget(splitter)
 
-        self.location_list.itemClicked.connect(
-            self.select_working_directory
-        )
-        self.location_list.itemDoubleClicked.connect(
-            self.select_working_directory
-        )
+        self.location_list.itemClicked.connect(self.select_subdirectory)
+        self.location_list.itemDoubleClicked.connect(self.select_subdirectory)
 
     # ------------------------------------------------------------------
     # Tabs
@@ -280,85 +321,107 @@ class BrowserWindow(QMainWindow):
     # Project / working directories
     # ------------------------------------------------------------------
 
+    def _load_location(self, location):
+        self._reset_tab_texts()
+        self.refresh_locations()
+        self._restore_working_directory()
+        self._update_action_states()
+
     def _restore_last_selected_project(self):
         if not hasattr(self.db, "get_last_selected_location"):
-            log.info(
-                "Database does not support last selected location retrieval."
-            )
+            log.info("Database does not support last selected location retrieval.")
             return
 
         location = self.db.get_last_selected_location()
         if location is None:
             log.info("No last selected location found in the database.")
             return
-
         self.current_location = location
-        log.info(
-            f"Restored last selected project: {self.current_location.name}"
-        )
-        self.current_working_directory = None
+        log.info(f"Restored last selected project: {self.current_location.name}")
+
+        wd = self.db.get_working_directory(self.current_location.id)
+        if wd is not None:
+            wd_path = self.current_location.path / wd
+            if wd_path.is_dir():
+                self.current_working_directory = wd_path
+                log.info(f"Restored last selected working directory: {self.current_working_directory.name}")
+            else:
+                self.current_working_directory = None
+                log.warning(f"Last selected working directory '{wd}' does not exist in project '{self.current_location.name}'.")
         self._update_current_location_ui()
         self._load_location(location)
+        if self.current_working_directory is not None:
+                self.pipeline_status_tree.set_working_directory(self.current_working_directory)
 
     def refresh_locations(self):
         self.location_list.clear()
-
         if self.current_location is None:
             return
+        wd = self.current_working_directory
+        if wd is None:
+            self.left_title.setText("Subdirectories")
+            return
+
+        self.left_title.setText(f"Subdirectories of {wd.name}")
 
         project_path = self.current_location.path
 
         try:
-            working_dirs = sorted(
-                [
-                    entry for entry in project_path.iterdir()
-                    if entry.is_dir() and entry.name.startswith("wd")
-                ],
-                key=lambda p: p.name,
-            )
+            wd = self.current_working_directory
+            if wd is not None and wd.exists() and wd.is_dir():
+                subdirs = sorted( [entry for entry in wd.iterdir() if entry.is_dir()], key=lambda p: p.name)
+                for working_dir in subdirs:
+                    item = QListWidgetItem(working_dir.name)
+                    item.setData(Qt.UserRole, working_dir)
+                    item.setToolTip(str(working_dir))
+                    self.location_list.addItem(item)
+                self.status_label.setText(f"Loaded {len(subdirs)} subdirectories of {wd.name}")
+            else:
+                self.status_label.setText("No working directory selected or it does not exist.")
         except OSError as exc:
-            self.status_label.setText(
-                f"Cannot list working directories: {exc}"
-            )
+            self.status_label.setText(f"Cannot list working directories: {exc}")
             return
 
-        if not working_dirs:
-            self.status_label.setText(
-                f"No working directories starting with 'wd' in {project_path}"
-            )
+        
+
+
+    def select_working_directory(self, working_dir, persist=True):
+        if self.current_location is None or working_dir is None:
             return
-
-        for working_dir in working_dirs:
-            item = QListWidgetItem(working_dir.name)
-            item.setData(Qt.UserRole, working_dir)
-            item.setToolTip(str(working_dir))
-            self.location_list.addItem(item)
-
-        self.status_label.setText(
-            f"Loaded {len(working_dirs)} working directories"
-        )
-
-    def select_working_directory(self, item):
-        working_dir = item.data(Qt.UserRole)
-
-        if not working_dir:
-            return
-
         self.current_working_directory = working_dir
+        if persist:
+            log.info(f"Persisting working directory selection: {working_dir.name}")
+            self.db.set_working_directory(self.current_location.id, working_dir.name)
 
-        self.location_status.setText(str(self.current_location.path))
-        self.status_label.setText(
-            f"Selected working directory: {working_dir.name}"
+        self.location_status.setText(
+            f"{self.current_location.path}  [{working_dir.name}]"
         )
-
         self.tasks_label.setText(
             f"Tasks\n\nSelected working directory:\n{working_dir}"
         )
         self.measurements_label.setText(
             f"Measurements\n\nSelected working directory:\n{working_dir}"
         )
-        # Load pipeline for this working directory
         self.pipeline_status_tree.set_working_directory(working_dir)
+        self.refresh_locations()
+        self._update_window_title()
+
+    def select_subdirectory(self, item):
+        sub = item.data(Qt.UserRole)
+        if sub:
+            self.status_label.setText(f"Selected: {sub}")
+
+    def _restore_working_directory(self):
+        if self.current_location is None:
+            return
+        name = self.db.get_working_directory(self.current_location.id)
+        if not name:
+            return
+        path = self.current_location.path / name
+        if path.is_dir():
+            self.select_working_directory(path, persist=False)
+        else:
+            self.db.set_working_directory(self.current_location.id, None)
 
     def _load_location(self, location):
         """
@@ -371,10 +434,10 @@ class BrowserWindow(QMainWindow):
     def _update_window_title(self):
         if self.current_location is None:
             self.setWindowTitle("Laupy")
+        elif self.current_working_directory is None:
+            self.setWindowTitle(f"Laupy - {self.current_location.name}")
         else:
-            self.setWindowTitle(
-                f"Laupy - {self.current_location.name}"
-            )
+            self.setWindowTitle(f"Laupy - {self.current_location.name} [{self.current_working_directory.name}]")
 
     # ------------------------------------------------------------------
     # File actions
@@ -484,9 +547,7 @@ class BrowserWindow(QMainWindow):
         if self.current_location is None:
             self.status_label.setText("No active project")
             return
-
         path = self.current_location.path / directory_name
-
         if path.exists():
             QMessageBox.information(
                 self,
@@ -494,7 +555,6 @@ class BrowserWindow(QMainWindow):
                 f"{path} already exists.",
             )
             return
-
         try:
             path.mkdir(parents=False, exist_ok=False)
         except OSError as exc:
@@ -512,6 +572,7 @@ class BrowserWindow(QMainWindow):
         self.status_label.setText(
             f"Created working directory: {directory_name}"
         )
+        self.select_working_directory(path)
 
     def open_terminal(self):
         if self.current_location is None:

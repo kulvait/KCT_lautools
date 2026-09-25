@@ -53,7 +53,6 @@ class LaupyDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.connection = sqlite3.connect(self.db_path)
-
         self.connection.execute("""
             CREATE TABLE IF NOT EXISTS locations (
                 id INTEGER PRIMARY KEY,
@@ -61,7 +60,8 @@ class LaupyDB:
                 path TEXT NOT NULL UNIQUE,
                 last_access TEXT,
                 description TEXT,
-                last_selected INTEGER NOT NULL DEFAULT 0
+                last_selected INTEGER NOT NULL DEFAULT 0,
+                last_working_directory TEXT
             )
         """)
 
@@ -122,6 +122,12 @@ class LaupyDB:
             self.connection.execute(
                 "ALTER TABLE locations "
                 "ADD COLUMN last_selected INTEGER NOT NULL DEFAULT 0"
+            )
+
+        if "last_working_directory" not in columns:
+            self.connection.execute(
+                "ALTER TABLE locations "
+                "ADD COLUMN last_working_directory TEXT"
             )
 
         self.connection.commit()
@@ -241,10 +247,8 @@ class LaupyDB:
             FROM locations
             WHERE path = ?
         """, (str(path.resolve()),)).fetchone()
-
         if row is None:
             return None
-
         return self._row_to_location(row)
 
     def get_last_selected_location(self) -> Location | None:
@@ -255,11 +259,23 @@ class LaupyDB:
             ORDER BY id DESC
             LIMIT 1
         """).fetchone()
-
         if row is None:
             return None
-
         return self._row_to_location(row)
+
+    def get_working_directory(self, location_id: int) -> str | None:
+        row = self.connection.execute(
+            "SELECT last_working_directory FROM locations WHERE id = ?",
+            (location_id,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_working_directory(self, location_id: int, wd_name: str | None):
+        self.connection.execute(
+            "UPDATE locations SET last_working_directory = ? WHERE id = ?",
+            (wd_name, location_id),
+        )
+        self.connection.commit()
 
     def update_last_access(self, location_id: int):
         now = datetime.now().isoformat(timespec="seconds")
