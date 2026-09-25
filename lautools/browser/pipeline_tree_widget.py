@@ -25,7 +25,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor
 
-from pipeline_manager import PipelineManager
+from lautools.browser.pipeline_manager import PipelineManager
+from laupy.flow import load_dag, save_dag, clean_dag
+from laupy.flow import update_dag_entries, resubmit_slurm_job
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -266,7 +268,6 @@ class PipelineTreeWidget(QWidget):
             self.config["update_slurm_info"],
         )
         worker.moveToThread(thread)
-
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_refresh_finished)
         worker.error.connect(self._on_refresh_error)
@@ -277,7 +278,6 @@ class PipelineTreeWidget(QWidget):
         worker.error.connect(worker.deleteLater)
         thread.finished.connect(self._on_thread_finished)
         thread.finished.connect(thread.deleteLater)
-
         self._refresh_thread = thread
         self._refresh_worker = worker
         thread.start()
@@ -306,17 +306,12 @@ class PipelineTreeWidget(QWidget):
     def _populate_tree(self, entries: List[Dict[str, Any]]):
         """Populate the tree widget with entries."""
         self.tree.clear()
-        
         if not entries:
-            self.tree.addTopLevelItem(
-                QTreeWidgetItem(["No entries to display"])
-            )
+            self.tree.addTopLevelItem(QTreeWidgetItem(["No entries to display"]))
             return
-        
         for entry in entries:
             item = self._create_entry_item(entry)
             self.tree.addTopLevelItem(item)
-        
         # Resize columns to content
         for i in range(self.tree.columnCount()):
             self.tree.resizeColumnToContents(i)
@@ -451,7 +446,9 @@ class PipelineTreeWidget(QWidget):
         if job_state in ("RUNNING", "PENDING"):
             menu.addAction("Cancel Job", lambda: self._cancel_job(entry))
         if job_state in ("FAILED", "CANCELLED", "TIMEOUT"):
-            menu.addAction("Retire Job", lambda: self._requeue_job(entry))
+            menu.addAction("Retire Job", lambda: self._retire_job(entry))
+        if job_state in ("FAILED", "CANCELLED", "TIMEOUT"):
+            menu.addAction("Resubmit Job", lambda: self._resubmit_job(entry))
         if script_path is not None and script_path.exists():
             menu.addAction("Open %s" % scriptname, lambda: self._open_files_vim(entry, [str(script_path)]))
         # If there are added actions, show the menu
@@ -489,7 +486,101 @@ class PipelineTreeWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Cannot open terminal", f"Failed to open terminal in {directory}: {e}",)
             self.status_label.setText("Failed to open terminal")
+
+
+    def _cancel_job(self, entry: Dict[str, Any]):
+        """Cancel a SLURM job."""
+        slurm_id = entry.get("slurm_id") or entry.get("job_id")
+        if slurm_id is None:
+            log.error("Cannot cancel job: no SLURM/job ID found in entry: %r", entry)
+            self.status_label.setText("Failed to cancel job: no job ID found")
+            return
+        try:
+            subprocess.run(["scancel", str(slurm_id)], check=True, capture_output=True, text=True,)
+        except FileNotFoundError:
+            log.error("Cannot cancel job %s: 'scancel' command not found", slurm_id)
+            self.status_label.setText(f"Failed to cancel job {slurm_id}: scancel not found")
+            return
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            log.error("Failed to cancel SLURM job %s (return code %s): %s", slurm_id, exc.returncode, stderr or "no error message",)
+            self.status_label.setText(f"Failed to cancel job {slurm_id}")
+            return
+        except OSError as exc:
+            log.error("Failed to cancel SLURM job %s: %s", slurm_id, exc)
+            self.status_label.setText(f"Failed to cancel job {slurm_id}")
+            return
+        log.info("Cancelled SLURM job %s", slurm_id)
+        self.status_label.setText(f"Cancelled job {slurm_id}")
+        self.refresh()
     
+    
+    def _retire_job(self, entry: Dict[str, Any]):
+        """Mark a SLURM job as retired."""
+        slurm_id = entry.get("slurm_id") or entry.get("job_id")
+        job_id = entry.get("job_id")
+        if job_id is None:
+            log.error("Cannot retire job: no SLURM/job ID found in entry: %r", entry)
+            self.status_label.setText("Failed to cancel job: no job ID found")
+            return
+        execution_unit_dir = entry.get("execution_unit_dir")
+        if not execution_unit_dir:
+            log.error( "Cannot retire job %s: no execution_unit_dir in entry: %r", slurm_id, entry,)
+            self.status_label.setText(f"Failed to retire job {slurm_id}: no execution directory")
+            return
+        try:
+            dag_entries = load_dag(execution_unit_dir)
+            update_dag_entries(dag_entries, update_retired=False, update_negative_step=False, filter_terminal_states=True,)
+            dag_entry = next((e for e in dag_entries if e.get("job_id") == job_id), None)
+            if dag_entry is None:
+                log.error("Cannot retire job %s: job not found in DAG %s", slurm_id, execution_unit_dir,)
+                self.status_label.setText(f"Failed to retire job {slurm_id}: job not found")
+                return
+            dag_entry["retired"] = True
+            save_dag(execution_unit_dir, dag_entries)
+        except Exception:
+            log.exception("Failed to retire job %s in %s", slurm_id, execution_unit_dir,)
+            self.status_label.setText(f"Failed to retire job {slurm_id}")
+            return
+        log.info("Retired SLURM job %s", slurm_id)
+        self.status_label.setText(f"Retired job {slurm_id}")
+        self.refresh()
+    
+    def _resubmit_job(self, entry: Dict[str, Any]):
+        """Requeue/resubmit a SLURM job."""
+        job_id = entry.get("job_id")
+        if job_id is None:
+            log.error("Cannot requeue job: no SLURM/job ID found in entry: %r", entry)
+            self.status_label.setText("Failed to requeue job: no job ID found")
+            return
+        execution_unit_dir = entry.get("execution_unit_dir")
+        if not execution_unit_dir:
+            log.error("Cannot requeue job %s: no execution_unit_dir in entry: %r", slurm_id, entry,)
+            self.status_label.setText(f"Failed to requeue job {slurm_id}: no execution directory")
+            return
+        try:
+            dag_entries = load_dag(execution_unit_dir)
+            update_dag_entries(dag_entries, update_retired=False, update_negative_step=False, filter_terminal_states=True,)
+            dag_entry = next((e for e in dag_entries if e.get("job_id") == job_id), None)
+            if dag_entry is None:
+                log.error("Cannot requeue job %s: job not found in DAG %s", job_id, execution_unit_dir,)
+                self.status_label.setText(f"Failed to requeue job {slurm_id}: job not found")
+                return
+            new_entry = resubmit_slurm_job(dag_entries, dag_entry)
+            if new_entry is None:
+                log.error("Failed to requeue job %s: resubmit_slurm_job returned None", slurm_id,)
+                self.status_label.setText(f"Failed to requeue job {slurm_id}")
+                return
+            dag_entries.append(new_entry)
+            save_dag(execution_unit_dir, dag_entries)
+        except Exception:
+            log.exception("Failed to requeue job %s in %s", slurm_id, execution_unit_dir,)
+            self.status_label.setText(f"Failed to requeue job {slurm_id}")
+            return
+        log.info("Requeued SLURM job %s", slurm_id)
+        self.status_label.setText(f"Requeued job {slurm_id}")
+        self.refresh()
+
     def _format_details(self, entry: Dict[str, Any]) -> str:
         """Format details string based on job state."""
         slurm_info = entry.get("slurm_info", {})

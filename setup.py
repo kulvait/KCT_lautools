@@ -53,7 +53,7 @@ setup(
             "createTickFile = lautools.scripts.createTickFile:main",
             "binDenFile = lautools.scripts.binDenFile:main",
             "GPU = lautools.scripts.GPU:main",
-            "lautools-browser = lautools.browser:main",
+            "lautools-browser = lautools.browser.main:main",
         ]
     },
     version=__version__,

@@ -21,9 +21,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from project_config_dialog import ProjectConfigDialog
-from project_manager import ProjectManager
-from pipeline_tree_widget import PipelineTreeWidget
+from lautools.browser.project_config_dialog import ProjectConfigDialog
+from lautools.browser.project_manager import ProjectManager
+from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)

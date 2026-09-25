@@ -5,7 +5,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 
-from db import LaupyDB, ProjectCache
+from lautools.browser.db import LaupyDB, ProjectCache
 
 
 @dataclass

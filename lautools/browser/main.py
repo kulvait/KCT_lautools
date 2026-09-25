@@ -11,9 +11,8 @@ from platformdirs import user_data_dir
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
-from db import LaupyDB
-from browser_window import BrowserWindow
-
+from lautools.browser.browser_window import BrowserWindow
+from lautools.browser.db import LaupyDB
 from lautools import resources_pyside 
 
 
