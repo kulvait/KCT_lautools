@@ -26,6 +26,12 @@ from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.project_manager import ProjectManager
 from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
 
+from lautools.browser.create_wd_dialogs import (
+    ProcessLogDialog,
+    SampleSelectionDialog,
+    script_command,
+)
+
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
@@ -543,36 +549,98 @@ class BrowserWindow(QMainWindow):
         safe_suffix = suffix.replace(" ", "_")
         self._create_named_working_directory(f"wd_{safe_suffix}")
 
+    def _list_raw_samples(self, raw_dir):
+        program, args = script_command("--list", raw_dir)
+        try:
+            result = subprocess.run(
+                [program, *args], capture_output=True, text=True, timeout=120
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"Cannot run listing: {exc}")
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or result.stdout or "Listing failed")
+        return [
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
     def _create_named_working_directory(self, directory_name: str):
         if self.current_location is None:
             self.status_label.setText("No active project")
             return
+
         path = self.current_location.path / directory_name
         if path.exists():
             QMessageBox.information(
-                self,
-                "Working directory exists",
-                f"{path} already exists.",
-            )
-            return
-        try:
-            path.mkdir(parents=False, exist_ok=False)
-        except OSError as exc:
-            QMessageBox.critical(
-                self,
-                "Cannot create working directory",
-                str(exc),
-            )
-            self.status_label.setText(
-                f"Failed to create {directory_name}"
+                self, "Working directory exists", f"{path} already exists."
             )
             return
 
-        self.refresh_locations()
-        self.status_label.setText(
-            f"Created working directory: {directory_name}"
+        raw_dir = self.current_location.path / "raw"
+        if not raw_dir.is_dir():
+            QMessageBox.critical(
+                self, "No raw directory", f"{raw_dir} does not exist."
+            )
+            return
+
+        # 1) List available samples
+        self.status_label.setText(f"Listing samples in {raw_dir}...")
+        try:
+            samples = self._list_raw_samples(raw_dir)
+        except RuntimeError as exc:
+            QMessageBox.critical(self, "Cannot list samples", str(exc))
+            self.status_label.setText("Sample listing failed")
+            return
+        if not samples:
+            QMessageBox.information(
+                self, "No samples", f"No samples found in {raw_dir}."
+            )
+            self.status_label.setText("No samples found")
+            return
+
+        # 2) Let the user choose (all preselected)
+        dialog = SampleSelectionDialog(samples, directory_name, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            self.status_label.setText("Working directory creation cancelled")
+            return
+        selected = dialog.selected_samples()
+        if not selected:
+            self.status_label.setText("No samples selected, nothing created")
+            return
+
+        # 3) Create wd and run the script asynchronously
+        try:
+            path.mkdir(parents=False, exist_ok=False)
+        except OSError as exc:
+            QMessageBox.critical(self, "Cannot create working directory", str(exc))
+            self.status_label.setText(f"Failed to create {directory_name}")
+            return
+
+        self._run_create_process(raw_dir, path, selected)
+
+    def _run_create_process(self, raw_dir, path, samples):
+        program, args = script_command(
+            "--samples", *samples, "--", raw_dir, path
         )
-        self.select_working_directory(path)
+
+        def on_finished(ok):
+            if ok:
+                self.status_label.setText(
+                    f"Created working directory {path.name} with {len(samples)} samples"
+                )
+            else:
+                self.status_label.setText(f"Errors while populating {path.name}")
+            self.select_working_directory(path)
+
+        self.status_label.setText(f"Populating {path.name}...")
+        self._create_wd_log = ProcessLogDialog(
+            f"Creating {path.name}", program, args,
+            on_finished=on_finished, parent=self,
+        )
+        self._create_wd_log.setModal(False)
+        self._create_wd_log.show()
+
 
     def open_terminal(self):
         if self.current_location is None:
