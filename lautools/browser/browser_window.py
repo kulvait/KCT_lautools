@@ -3,6 +3,7 @@ import subprocess
 import logging
 
 from lautools import resources_pyside
+from lautools.browser.utils import open_files_mousepad, open_terminal, open_hdf5view
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QActionGroup
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QStatusBar,
     QSplitter,
     QTabWidget,
@@ -93,7 +95,7 @@ class BrowserWindow(QMainWindow):
         self.configure_action = project_menu.addAction("Configure...")
         self.configure_action.triggered.connect(self.configure_project)
         self.open_terminal_action = project_menu.addAction("Open Terminal")
-        self.open_terminal_action.triggered.connect(self.open_terminal)
+        self.open_terminal_action.triggered.connect(lambda: open_terminal(self.current_location.path, on_error=lambda e: self.status_label.setText(f"Error: {e}")))
         project_menu.addSeparator()
         self.create_wd_action = project_menu.addAction("Create wd")
         self.create_wd_action.triggered.connect(
@@ -252,6 +254,8 @@ class BrowserWindow(QMainWindow):
 
         self.location_list.itemClicked.connect(self.select_subdirectory)
         self.location_list.itemDoubleClicked.connect(self.select_subdirectory)
+        self.location_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.location_list.customContextMenuRequested.connect(self._show_folder_context_menu)
 
     # ------------------------------------------------------------------
     # Tabs
@@ -640,27 +644,28 @@ class BrowserWindow(QMainWindow):
         self._create_wd_log.setModal(False)
         self._create_wd_log.show()
 
-
-    def open_terminal(self):
-        if self.current_location is None:
-            self.status_label.setText("No active project")
+    def _show_folder_context_menu(self, position):
+        """Show context menu for right-clicked folder item in left panel."""
+        item = self.location_list.itemAt(position)
+        if item is None:
             return
-
-        project_path = self.current_location.path
-        try:
-            subprocess.Popen(
-                ["xfce4-terminal", "--working-directory", str(project_path)]
-            )
-            self.status_label.setText(
-                f"Opened terminal in {project_path}"
-            )
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Cannot open terminal",
-                f"Failed to open terminal: {e}",
-            )
-            self.status_label.setText("Failed to open terminal")
+        folder_path = item.data(Qt.UserRole)
+        if not isinstance(folder_path, Path):
+            return
+        menu = QMenu(self)
+        menu.addAction("Open Terminal Here", lambda: open_terminal(folder_path, on_error=lambda e: self.status_label.setText(f"Error: {e}")))
+        menu.addSeparator()
+        params_file = folder_path / "params"
+        if params_file.is_file():
+            menu.addAction("Open params", 
+                lambda: open_files_mousepad([params_file], on_error=lambda e: self.status_label.setText(f"Error: {e}")))
+        param_json_file = folder_path / "param.json"
+        if param_json_file.is_file():
+            menu.addAction("Open param.json", lambda: open_files_mousepad([param_json_file], on_error=lambda e: self.status_label.setText(f"Error: {e}")))
+        h5_file = folder_path / "h5"
+        if h5_file.is_file():
+            menu.addAction("Open h5", lambda: open_hdf5view(str(h5_file), on_error=lambda e: self.status_label.setText(f"Error: {e}")))
+        menu.exec(self.location_list.viewport().mapToGlobal(position))
 
     # ------------------------------------------------------------------
     # Helpers

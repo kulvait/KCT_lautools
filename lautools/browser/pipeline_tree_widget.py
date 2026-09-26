@@ -29,6 +29,8 @@ from lautools.browser.pipeline_manager import PipelineManager
 from laupy.flow import load_dag, save_dag, clean_dag
 from laupy.flow import update_dag_entries, resubmit_slurm_job
 
+from lautools.browser.utils import open_files_mousepad, open_terminal, open_files_vim
+
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
@@ -432,15 +434,15 @@ class PipelineTreeWidget(QWidget):
         menu = QMenu(self)
         #log.info(f"Context menu for job {job_name} (ID: {entry.get('job_id', 'N/A')}) with state {job_state} stdout: {stdout_file}, stderr: {stderr_file}")
         if stdout_file is not None and stderr_file is not None:
-            menu.addAction("Open Both StdOut and StdErr", lambda: (self._open_files_mousepad(entry, [stdout_file, stderr_file])))
+            menu.addAction("Open Both StdOut and StdErr", lambda: (open_files_mousepad([stdout_file, stderr_file], on_error=lambda msg: self.status_label.setText(msg))))
         if stdout_file is not None:
-            menu.addAction(f"StdOut: {stdout_basename}", lambda: self._open_files_mousepad(entry, [stdout_file]))
+            menu.addAction(f"StdOut: {stdout_basename}", lambda: open_files_mousepad([stdout_file], on_error=lambda msg: self.status_label.setText(msg)))
         if stderr_file is not None:
-            menu.addAction(f"StdErr: {stderr_basename}", lambda: self._open_files_mousepad(entry, [stderr_file]))
+            menu.addAction(f"StdErr: {stderr_basename}", lambda: open_files_mousepad([stderr_file], on_error=lambda msg: self.status_label.setText(msg)))
         if menu.actions():
             menu.addSeparator()
         if unit_dir is not None:
-            menu.addAction("Open Terminal Here", lambda: self._open_terminal(Path(unit_dir)))
+            menu.addAction("Open Terminal Here", lambda: open_terminal(unit_dir, on_error=lambda msg: self.status_label.setText(msg)))
         if menu.actions():
             menu.addSeparator()
         if job_state in ("RUNNING", "PENDING"):
@@ -450,43 +452,10 @@ class PipelineTreeWidget(QWidget):
         if job_state in ("FAILED", "CANCELLED", "TIMEOUT"):
             menu.addAction("Resubmit Job", lambda: self._resubmit_job(entry))
         if script_path is not None and script_path.exists():
-            menu.addAction("Open %s" % scriptname, lambda: self._open_files_vim(entry, [str(script_path)]))
+            menu.addAction("Open %s" % scriptname, lambda: open_files_vim([str(script_path)], on_error=lambda msg: self.status_label.setText(msg)))
         # If there are added actions, show the menu
         if menu.actions():
             menu.exec(self.tree.viewport().mapToGlobal(position))
-
-    def _open_files_mousepad(self, entry: Dict[str, Any], files: List[str]):
-        """Open files in mousepad"""
-        if files is None or len(files) == 0:
-            return
-        if not QProcess.startDetached("mousepad", files):
-            QMessageBox.warning(self, "Cannot open log file", f"Could not start xdg-open for:\n{log_path}",)
-    
-    def _open_files_vim(self, entry: Dict[str, Any], files: List[str]):
-        """Open files in mousepad"""
-        directory = self.global_working_dir if self.global_working_dir else Path.cwd()
-        if files is None or len(files) == 0:
-            return
-        elif len(files) == 1:
-            directory = Path(files[0]).parent
-        try:
-            subprocess.Popen(["xfce4-terminal", "--working-directory", str(directory), "--command", f"vim {' '.join(map(shlex.quote, files))}"])
-        except Exception as e:
-            QMessageBox.critical(self, "Cannot open file in vim", f"Failed to open file in vim: {e}",)
-    
-    def _open_terminal(self, directory):
-        """Open a terminal in the current working directory or specified directory."""
-        if directory is None:
-            return
-        if not directory.exists() or not directory.is_dir():
-            QMessageBox.warning(self, "Invalid directory {directory}", f"Cannot open terminal in {directory}: Not a valid directory.",)
-            return
-        try:
-            subprocess.Popen(["xfce4-terminal", "--working-directory", str(directory)])
-        except Exception as e:
-            QMessageBox.critical(self, "Cannot open terminal", f"Failed to open terminal in {directory}: {e}",)
-            self.status_label.setText("Failed to open terminal")
-
 
     def _cancel_job(self, entry: Dict[str, Any]):
         """Cancel a SLURM job."""
