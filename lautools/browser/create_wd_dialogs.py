@@ -69,7 +69,7 @@ class SampleSelectionDialog(QDialog):
 class ProcessLogDialog(QDialog):
     """Runs a QProcess asynchronously and streams its output."""
 
-    def __init__(self, title, program, args, on_finished=None, parent=None):
+    def __init__(self, title, program, args, on_finished=None, parent=None, log_file=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(800, 500)
@@ -91,6 +91,9 @@ class ProcessLogDialog(QDialog):
         self.process.readyReadStandardOutput.connect(self._read_output)
         self.process.finished.connect(self._finished)
         self.process.errorOccurred.connect(self._error)
+          
+        self.log_file = str(log_file)
+        self.full_output = ""
 
         self.output.appendPlainText("$ " + " ".join([program, *args]) + "\n")
         self.process.start(program, args)
@@ -99,12 +102,16 @@ class ProcessLogDialog(QDialog):
         data = self.process.readAllStandardOutput().data().decode(errors="replace")
         self.output.insertPlainText(data)
         self.output.ensureCursorVisible()
+        self.full_output += data
 
     def _finished(self, exit_code, exit_status):
         ok = exit_status == QProcess.NormalExit and exit_code == 0
         self.output.appendPlainText(
             "\nFinished successfully." if ok else f"\nFailed (exit code {exit_code})."
         )
+        if self.log_file:
+            with open(self.log_file, "w") as f:
+                f.write(self.full_output)
         self.buttons.button(QDialogButtonBox.Close).setEnabled(True)
         if self._on_finished:
             self._on_finished(ok)

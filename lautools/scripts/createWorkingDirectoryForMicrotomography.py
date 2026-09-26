@@ -32,11 +32,26 @@ import h5py
 import random
 import traceback
 import argparse
+import sys
+import datetime
+import logging
 from pathlib import Path
 from denpy import DICOM
 from denpy import PETRA
 from denpy import UTILS
 
+# Create a logger specific to this module
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO) # Set the logging level to INFO
+# Create a console handler and set its level to INFO
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+# Create a formatter and set it for the handler
+formatter = logging.Formatter('%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s', datefmt='%d.%m.%Y %H:%M:%S')
+ch.setFormatter(formatter)
+# Add the handler to the logger
+log.addHandler(ch)
+log.propagate = False # Prevent log messages from being propagated to the root logger
 
 
 def getInfo(directory):
@@ -117,6 +132,10 @@ def main():
 			print(name)
 		sys.exit(0)
 	
+	# Option --list shall not print the start and end messages, but --dry-run shall, so we move the print statements here.
+	print("START createWorkingDirectoryForMicrotomography %s" % " ".join(sys.argv[1:]))
+	print("Date: %s" % datetime.datetime.now().strftime("%d.%m.%y %H:%M:%S"))
+	
 	subDirsLen = len(subDirs)
 	if ARG.verbose:
 		print("There is %d item in subDirs list to be processed." % subDirsLen)
@@ -145,7 +164,7 @@ def main():
 					selectedSamples.add(line)
 	
 	if ARG.samples is not None or ARG.samples_file is not None:
-		subDirs = [	x for x in subDirs if os.path.basename(x) in selectedSamples	]
+		subDirs = [x for x in subDirs if os.path.basename(x) in selectedSamples]
 		if len(subDirs) < subDirsLen:
 			subDirsLen = len(subDirs)
 			if ARG.verbose:
@@ -294,6 +313,7 @@ def main():
 	
 	# Summary of processing
 	print("Total successfully processed subdirectories:", processed_count)
+	print("END createWorkingDirectoryForMicrotomography")
 
 if __name__ == "__main__":
     main()

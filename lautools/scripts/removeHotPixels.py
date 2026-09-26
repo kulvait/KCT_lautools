@@ -122,8 +122,6 @@ from imagecodecs.zarr import register_codecs as register_zarr_codecs
 register_numcodecs_codecs()
 register_zarr_codecs()
 
-
-
 # Create a logger specific to this module
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO) # Set the logging level to INFO

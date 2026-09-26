@@ -572,9 +572,9 @@ class BrowserWindow(QMainWindow):
 
         path = self.current_location.path / directory_name
         if path.exists():
-            QMessageBox.information(
-                self, "Working directory exists", f"{path} already exists."
-            )
+            msg = f"Working directory {path} already exists."
+            log.warning(msg)
+            self.status_label.setText(msg)
             return
 
         raw_dir = self.current_location.path / "raw"
@@ -613,16 +613,14 @@ class BrowserWindow(QMainWindow):
         try:
             path.mkdir(parents=False, exist_ok=False)
         except OSError as exc:
-            QMessageBox.critical(self, "Cannot create working directory", str(exc))
-            self.status_label.setText(f"Failed to create {directory_name}")
+            msg = f"Failed to create working directory {path}: {exc}"
+            log.error(msg)
+            self.status_label.setText(msg)
             return
-
         self._run_create_process(raw_dir, path, selected)
 
     def _run_create_process(self, raw_dir, path, samples):
-        program, args = script_command(
-            "--samples", *samples, "--", raw_dir, path
-        )
+        program, args = script_command("--samples", *samples, "--", raw_dir, path)
 
         def on_finished(ok):
             if ok:
@@ -634,9 +632,10 @@ class BrowserWindow(QMainWindow):
             self.select_working_directory(path)
 
         self.status_label.setText(f"Populating {path.name}...")
+        log_file = path / f"createStructure.log"
         self._create_wd_log = ProcessLogDialog(
             f"Creating {path.name}", program, args,
-            on_finished=on_finished, parent=self,
+            on_finished=on_finished, parent=self, log_file=log_file
         )
         self._create_wd_log.setModal(False)
         self._create_wd_log.show()
