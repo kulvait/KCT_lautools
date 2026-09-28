@@ -15,6 +15,7 @@ pkg_requires = [
     "imagecodecs>=2026.6.6",
     "scikit-image",
     "termcolor",
+    "platformdirs",
 ]
 
 extras = {
