@@ -518,6 +518,7 @@ class PipelineTreeWidget(QWidget):
     def _resubmit_job(self, entry: Dict[str, Any]):
         """Requeue/resubmit a SLURM job."""
         job_id = entry.get("job_id")
+        slurm_id = entry.get("slurm_id") or job_id
         if job_id is None:
             log.error("Cannot requeue job: no SLURM/job ID found in entry: %r", entry)
             self.status_label.setText("Failed to requeue job: no job ID found")

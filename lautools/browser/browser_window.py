@@ -3,7 +3,7 @@ import subprocess
 import logging
 
 from lautools import resources_pyside
-from lautools.browser.utils import open_files_mousepad, open_terminal, open_hdf5view
+from lautools.browser.utils import open_files_mousepad, open_terminal, open_hdf5view, open_thunar, open_files_vim
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QActionGroup
@@ -260,7 +260,6 @@ class BrowserWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Tabs
     # ------------------------------------------------------------------
-
     def _create_tasks_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -391,9 +390,6 @@ class BrowserWindow(QMainWindow):
         except OSError as exc:
             self.status_label.setText(f"Cannot list working directories: {exc}")
             return
-
-        
-
 
     def select_working_directory(self, working_dir, persist=True):
         if self.current_location is None or working_dir is None:
@@ -593,7 +589,7 @@ class BrowserWindow(QMainWindow):
         try:
             samples = self._list_raw_samples(raw_dir)
         except RuntimeError as exc:
-            QMessageBox.critical(self, "Cannot list samples", str(exc))
+            log.error(f"Sample listing failed: {exc}")
             self.status_label.setText("Sample listing failed")
             return
         if not samples:
@@ -654,6 +650,7 @@ class BrowserWindow(QMainWindow):
             return
         menu = QMenu(self)
         menu.addAction("Open Terminal Here", lambda: open_terminal(folder_path, on_error=lambda e: self.status_label.setText(f"Error: {e}")))
+        menu.addAction("Open Thunar Here", lambda: open_thunar(folder_path, on_error=lambda e: self.status_label.setText(f"Error: {e}")))
         menu.addSeparator()
         params_file = folder_path / "params"
         if params_file.is_file():
@@ -665,6 +662,9 @@ class BrowserWindow(QMainWindow):
         h5_file = folder_path / "h5"
         if h5_file.is_file():
             menu.addAction("Open h5", lambda: open_hdf5view(str(h5_file), on_error=lambda e: self.status_label.setText(f"Error: {e}")))
+        dag_json = folder_path / "pipeline" / "dag.json"
+        if dag_json.is_file():
+            menu.addAction("Open dag.json", lambda: open_files_vim([str(dag_json)], on_error=lambda e: self.status_label.setText(f"Error: {e}")))
         menu.exec(self.location_list.viewport().mapToGlobal(position))
 
     # ------------------------------------------------------------------

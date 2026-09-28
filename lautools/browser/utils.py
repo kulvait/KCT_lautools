@@ -90,7 +90,7 @@ def open_files_vim(files: List[str], working_dir: Optional[Path] = None,
         return False
 
 
-def open_terminal(directory: Path, on_error: Optional[Callable[[str], None]] = None) -> bool:
+def open_terminal(directory: [str, Path], on_error: Optional[Callable[[str], None]] = None) -> bool:
     """
     Open a terminal in the specified directory.
     
@@ -106,6 +106,7 @@ def open_terminal(directory: Path, on_error: Optional[Callable[[str], None]] = N
     bool
         True if successful, False otherwise.
     """
+    directory = Path(directory) if isinstance(directory, str) else directory
     if directory is None or not directory.exists() or not directory.is_dir():
         error_msg = f"Cannot open terminal: invalid directory {directory}"
         log.warning(error_msg)
@@ -133,7 +134,7 @@ def open_hdf5view(file: str, on_error: Optional[Callable[[str], None]] = None) -
     Parameters
     ----------
     file : str
-	    File path to open.
+        File path to open.
     on_error : Optional[Callable[[str], None]]
         Optional callback to handle errors (e.g., update status label).
     
@@ -152,3 +153,36 @@ def open_hdf5view(file: str, on_error: Optional[Callable[[str], None]] = None) -
             on_error(error_msg)
         return False
     return True
+
+def open_thunar(directory: [str, Path], on_error: Optional[Callable[[str], None]] = None) -> bool:
+    """
+    Open Thunar file manager in the specified directory.
+    
+    Parameters
+    ----------
+    directory : Path
+        Directory to open Thunar in.
+    on_error : Optional[Callable[[str], None]]
+        Optional callback to handle errors.
+    
+    Returns
+    -------
+    bool
+        True if successful, False otherwise.
+    """
+    directory = Path(directory) if isinstance(directory, str) else directory
+    if directory is None or not directory.exists() or not directory.is_dir():
+        error_msg = f"Cannot open Thunar: invalid directory {directory}"
+        log.warning(error_msg)
+        if on_error:
+            on_error(error_msg)
+        return False
+    try:
+        subprocess.Popen(["thunar", str(directory)])
+        return True
+    except Exception as e:
+        error_msg = f"Failed to open Thunar in {directory}: {e}"
+        log.error(error_msg)
+        if on_error:
+            on_error(error_msg)
+        return False
