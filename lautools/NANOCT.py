@@ -4,7 +4,7 @@ import re
 from glob import glob
 import os
 from datetime import datetime, timedelta
-import pytz
+from zoneinfo import ZoneInfo
 import logging
 
 # Create a logger specific to this module
@@ -52,8 +52,7 @@ def scanDataset(LogScan, imgDir=None):
 					start_time = int(float(time_str))  # Convert to float first to handle cases like 1.761064e+09
 					dt_utc = pd.to_datetime(start_time, unit='s', utc=True)
 					# Convert to Central European Time with daylight saving automatically
-					cet_tz = pytz.timezone("Europe/Berlin")
-					dt_cet = dt_utc.tz_convert(cet_tz)
+					dt_cet = dt_utc.tz_convert(ZoneInfo("Europe/Berlin"))
 					formatted_time = dt_cet.strftime("%d.%m.%Y %H:%M")
 					log.info(f"Experiment start: {formatted_time} (CET)")
 				except ValueError:

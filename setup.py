@@ -12,27 +12,25 @@ pkg_requires = [
     "zarr",
     "scipy",
     "pandas",
-    "pytz",
     "imagecodecs>=2026.6.6",
     "scikit-image",
+    "termcolor",
+    "shellx",
 ]
 
 extras = {
     "gui": [
+        "pyside6",
         "wxPython",
-        "shellx",
-        "termcolor",
     ],
     "gpu": [
         "redis",
         "pycuda",
         "pyopencl",
-        "termcolor",
     ],
     "full": [
+        "pyside6",
         "wxPython",
-        "shellx",
-        "termcolor",
         "redis",
         "pycuda",
         "pyopencl",
