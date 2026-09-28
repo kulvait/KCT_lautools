@@ -35,6 +35,7 @@ import argparse
 import sys
 import datetime
 import logging
+from pprint import pprint
 from pathlib import Path
 from denpy import DICOM
 from denpy import PETRA
@@ -47,7 +48,7 @@ log.setLevel(logging.INFO) # Set the logging level to INFO
 ch = logging.StreamHandler()
 ch.setLevel(logging.INFO)
 # Create a formatter and set it for the handler
-formatter = logging.Formatter('%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s', datefmt='%d.%m.%Y %H:%M:%S')
+formatter = logging.Formatter('%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s', datefmt='%d.%m.%y %H:%M:%S')
 ch.setFormatter(formatter)
 # Add the handler to the logger
 log.addHandler(ch)
@@ -87,6 +88,26 @@ def getInfo(directory):
 		sys.stdout = old_stdout
 		out["log"] = log_buffer.getvalue()
 		log_buffer.close()
+
+def matlabLogParse(path):
+	"""Parse a MATLAB reco log and keep only valid key:value entries."""
+	content = {}
+	with open(path, "r", errors="replace") as f:
+		for line in f:
+			if ":" not in line:
+				continue
+			key, value = (part.strip() for part in line.split(":", 1))
+			if key and value and key not in content:
+				content[key] = value
+	return content
+
+
+def matlabLogDirectoryGetFirstItem(content, *keys):
+	"""Return the value of the first key in keys that is in content, else None."""
+	for k in keys:
+		if k in content and content[k] != "":
+			return content[k]
+	return None
 
 def main():
 	parser = argparse.ArgumentParser()
@@ -134,7 +155,7 @@ def main():
 	
 	# Option --list shall not print the start and end messages, but --dry-run shall, so we move the print statements here.
 	print("START createWorkingDirectoryForMicrotomography %s" % " ".join(sys.argv[1:]))
-	print("Date: %s" % datetime.datetime.now().strftime("%d.%m.%y %H:%M:%S"))
+	print("Date: %s" % datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S"))
 	
 	subDirsLen = len(subDirs)
 	if ARG.verbose:
@@ -198,82 +219,58 @@ def main():
 			if processed_dir is not None:
 				processeddir = os.path.join(processed_dir, basename)
 				if os.path.exists(processeddir):
-					print("Found processed dir %s" % processeddir)
 					params["processed"] = os.path.realpath(processeddir)
 			
 			# Check if we need to skip based on processed_only
 			if "processed" in params:
-				logfile = glob.glob(os.path.join(params["processed"], '**/reco.log'), recursive=True)
+				logfile = glob.glob(os.path.join(params["processed"], 'reco*/**/reco_*.log'), recursive=True)
+				print(f"Found processed dir {params['processed']} with {len(logfile)} Matlab reco.log files.")
 				if len(logfile) == 0 and ARG.processed_only:
 					continue
 				elif len(logfile) != 0:
-					params["logfile"] = os.path.realpath(logfile[0])
-					with open(params["logfile"], "r") as logfile:
-						logcontent = dict(map(str.strip, l.split(':', 1)) for l in logfile.readlines())
-						if "rotation_axis_offset_reco" in logcontent:
-							params["rotation_axis_offset_reco"] = logcontent["rotation_axis_offset_reco"]
-						if "effective_pixel_size" in logcontent:
-							params["effective_pixel_size"] = logcontent["effective_pixel_size"].rsplit(" ")[0]
-						if "sample_detector_distance" in logcontent:
-							params["sample_detector_distance"] = logcontent["sample_detector_distance"].rsplit(" ")[0]
+					params["jm_reco_logfile"] = os.path.realpath(logfile[0])
+					with open(params["jm_reco_logfile"], "r") as logfile:
+						print("Reading Matlab log file %s" % params["jm_reco_logfile"])
+						logcontent = matlabLogParse(params["jm_reco_logfile"])
+						jm_offset =  matlabLogDirectoryGetFirstItem(logcontent, "rot_axis_offset_reco", "rot_axis_offset")
+						if jm_offset is not None:
+							params["jm_rotation_axis_offset_binned"] = jm_offset
+						jm_binning = matlabLogDirectoryGetFirstItem(logcontent, "raw_binning_factor", "raw_bin", "reco_binning_factor")
+						if jm_binning is not None:
+							params["jm_binning"] = jm_binning
 			else:
 				if ARG.processed_only:
 					print("Skipping %s as it has not related entry in %d dir and --processed-only is set." % (info["rawdir"], processed_dir))
 					continue
-			
-			# Open the HDF5 file and retrieve camera information
-			with h5py.File(info["h5"], 'r') as h5:
-				if "/entry/hardware/camera1" in h5:
-					cam = "camera1"
-				elif "/entry/hardware/camera" in h5:
-					cam = "camera"
-				else:
-					print("Skiping %s as there is no camera entry in h5 file." % info["h5"])
-					continue
-				
-				# Extract camera pixel size and magnification
-				if "entry/hardware/%s/pixelsize" % cam in h5:
-					params["pixel_size_camera"] = h5["entry/hardware/%s/pixelsize" % cam][0]
-				elif "entry/hardware/%s/camera/px_size" % cam in h5:
-					params["pixel_size_camera"] = h5["entry/hardware/%s/camera/px_size" % cam][0]
-				else:
-					print("Skiping %s as there is no pixel_size_camera entry in entry/hardware/%s/pixelsize or entry/hardware/%s/camera/px_size." % (info["h5"], cam, cam))
-					continue
-				if "entry/hardware/%s/magnification" % cam in h5:
-					params["pixel_size_magnification"] = h5["entry/hardware/%s/magnification" % cam][0]
-				elif "entry/hardware/%s/calibration/magnification" % cam in h5:
-					params["pixel_size_magnification"] = h5["entry/hardware/%s/calibration/magnification" % cam][0]
-				else:
-					print("Skiping %s as there is no pixel_size_magnification entry in entry/hardware/%s/magnification or entry/hardware/%s/calibration/magnification." % (info["h5"], cam, cam))
-					continue
-				
-				# Check for zero magnification and raise an informative error
-				if float(params["pixel_size_magnification"]) == 0:
-					print("Skiping %s as there is zero pixel_size_magnification in entry/hardware/%s/magnification." % (info["h5"], cam))
-					continue
-				
-				# Calculate pixel sizes
-				params["pixel_size_x"] = float(params["pixel_size_camera"]) / float(params["pixel_size_magnification"])
-				params["pixel_size_y"] = float(params["pixel_size_camera"]) / float(params["pixel_size_magnification"])
-				
-				# Optionally, get sensor size if available
-				pdimx = 0
-				pdimy = 0
-				if "entry/hardware/%s/sensorsize_x" % cam in h5:
-					pdimx = int(h5["entry/hardware/%s/sensorsize_x" % cam][0])
-				elif "entry/hardware/%s/camera/senzor_xsize" % cam in h5:
-					pdimx = int(h5["entry/hardware/%s/camera/senzor_xsize" % cam][0])
-				if pdimx != 0:
-					params["pdimx"] = "%d" % pdimx
-					params["projection_size_x"] = pdimx * float(params["pixel_size_x"])
-				if "entry/hardware/%s/sensorsize_y" % cam in h5:
-					pdimy = int(h5["entry/hardware/%s/sensorsize_y" % cam][0])
-				elif "entry/hardware/%s/camera/senzor_ysize" % cam in h5:
-					pdimy = int(h5["entry/hardware/%s/camera/senzor_ysize" % cam][0])
-				if pdimy != 0:
-					params["pdimy"] = "%d" % pdimy
-					params["projection_size_y"] = pdimy * float(params["pixel_size_y"])
-			
+			info_petra = PETRA.getExperimentInfo(info["h5"])
+			if "pix_size" in info_petra:
+				params["pixel_size_x"] = info_petra["pix_size"]
+				params["pixel_size_y"] = info_petra["pix_size"]
+			if "fresnel_number" in info_petra:
+				params["fresnel_number"] = info_petra["fresnel_number"]
+			if "energy_keV" in info_petra:
+				params["energy_keV"] = info_petra["energy_keV"]
+			if "propagation_distance_mm" in info_petra:
+				params["propagation_distance_mm"] = info_petra["propagation_distance_mm"]
+			if "field_of_view_x" in info_petra["camera"]:
+				params["field_of_view_x"] = info_petra["field_of_view_x"]
+			if "field_of_view_y" in info_petra["camera"]:
+				params["field_of_view_y"] = info_petra["field_of_view_y"]
+			if "camera" in info_petra:
+				if "magnification" in info_petra["camera"]:
+					params["camera_magnification"] = info_petra["camera"]["magnification"]
+				if "pixelsize" in info_petra["camera"]:
+					params["camera_pixel_size"] = info_petra["camera"]["pixelsize"]
+				if "sensorsize_x" in info_petra["camera"]:
+					params["senzorsize_x"] = info_petra["camera"]["sensorsize_x"]
+				if "sensorsize_y" in info_petra["camera"]:
+					params["senzorsize_y"] = info_petra["camera"]["sensorsize_y"]
+				if "roi_width" in info_petra["camera"]:
+					params["pdimx"] = "%d" % info_petra["camera"]["roi_width"]
+				if "roi_height" in info_petra["camera"]:
+					params["pdimy"] = "%d" % info_petra["camera"]["roi_height"]
+			print("Parameters:")
+			pprint(params)
 			# Handle output processing, logging, and directory setup
 			if ARG.params_update:
 				if os.path.exists(workdir):
@@ -316,4 +313,4 @@ def main():
 	print("END createWorkingDirectoryForMicrotomography")
 
 if __name__ == "__main__":
-    main()
+	main()
