@@ -17,6 +17,7 @@ from lautools.db import LaupyDB
 from lautools import resources_pyside
 
 APP_NAME = "laupy Browser"
+APP_NAME = "laupy_browser"
 DEFAULT_DATABASE_NAME = "laupy_beamtimes.sqlite"
 
 log = logging.getLogger(__name__)

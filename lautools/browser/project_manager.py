@@ -1,160 +1,169 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import json
+import os
 from pathlib import Path
+from typing import Any, Callable
 
-from lautools.db import LaupyDB, ProjectCache
+from lautools.db import (
+    Beamtime,
+    BeamtimeStorage,
+    LaupyDB,
+    LaupyProject,
+    LaupyProjectWorkspace,
+)
+
+ProgressCallback = Callable[[str], None]
 
 
-@dataclass
-class ApplicantInfo:
-    username: str | None = None
-    lastname: str | None = None
-    institute: str | None = None
-    email: str | None = None
-    user_id: str | None = None
-
-
-@dataclass
-class BeamtimeInfo:
-    beamtime_id: str
-    beamline: str | None = None
-    beamline_alias: str | None = None
-    beamline_setup: str | None = None
-    facility: str | None = None
-    proposal_id: str | None = None
-    proposal_type: str | None = None
-    event_start: str | None = None
-    event_end: str | None = None
-    generated: str | None = None
-    core_path: Path | None = None
-    applicant: ApplicantInfo | None = None
+def _now() -> datetime:
+    return datetime.now().replace(microsecond=0)
 
 
 @dataclass
-class BeamtimeInspection:
-    beamtime_root: Path
-    raw_exists: bool
-    processed_exists: bool
-    scratch_cc_exists: bool
-    shared_exists: bool
-    raw_subdir_count: int
-    raw_subdir_samples: list[str]
-    raw_size_bytes: int | None = None
-    processed_size_bytes: int | None = None
-    scratch_cc_size_bytes: int | None = None
+class BeamtimeDetail:
+    """A beamtime linked to a project, with its separately stored state."""
+
+    beamtime: Beamtime
+    storage: BeamtimeStorage | None
 
 
 @dataclass
 class ProjectInfo:
-    location_id: int
-    name: str
-    path: Path
-    description: str | None = None
-    project_size_bytes: int | None = None
-    last_inspected: str | None = None
-    beamtime_info: BeamtimeInfo | None = None
-    inspection: BeamtimeInspection | None = None
+    """Browser-facing view assembled from database rows."""
+
+    project: LaupyProject
+    workspaces: list[LaupyProjectWorkspace] = field(default_factory=list)
+    beamtimes: list[BeamtimeDetail] = field(default_factory=list)
+
+    @property
+    def id(self) -> int | None:
+        return self.project.id
+
+    @property
+    def name(self) -> str:
+        return self.project.name
+
+    @property
+    def path(self) -> Path:
+        return self.project.path
+
+    @property
+    def description(self) -> str | None:
+        return self.project.description
+
+    @property
+    def project_size_bytes(self) -> int | None:
+        return self.project.project_size_bytes
+
+    @property
+    def last_inspected(self) -> str | None:
+        value = self.project.last_inspected
+        return value.isoformat(timespec="seconds") if value else None
 
 
 class BeamtimeManager:
-    def find_beamtime_root(self, project_path: Path) -> Path | None:
-        parts = project_path.resolve().parts
+    """Filesystem operations only; persistence belongs to ProjectManager."""
 
-        for i in range(len(parts) - 6):
+    def find_beamtime_root(self, path: Path) -> Path | None:
+        """Recognize .../gpfs/<a>/<b>/data/<numeric-id>/... paths.
+
+        An independent project outside that layout has no inferred beamtime.
+        It can still be linked explicitly with ProjectManager.link_beamtime().
+        """
+        parts = path.resolve().parts
+
+        for i, part in enumerate(parts):
             if (
-                parts[i] == "gpfs"
+                part == "gpfs"
                 and i + 4 < len(parts)
                 and parts[i + 3] == "data"
+                and parts[i + 4].isdigit()
             ):
-                beamtime_id = parts[i + 4]
-                if beamtime_id.isdigit():
-                    return Path(*parts[: i + 5])
+                return Path(*parts[: i + 5])
 
         return None
 
-    def load_beamtime_info(self, beamtime_root: Path) -> BeamtimeInfo | None:
-        beamtime_id = beamtime_root.name
-        metadata_file = beamtime_root / f"beamtime-metadata-{beamtime_id}.json"
-
-        if not metadata_file.exists():
-            return None
+    def load_metadata(self, root: Path) -> tuple[dict[str, Any] | None, str | None]:
+        metadata_file = root / f"beamtime-metadata-{root.name}.json"
 
         try:
-            data = json.loads(metadata_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+            text = metadata_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None, None
+        except OSError:
+            raise
 
-        applicant_raw = data.get("applicant", {}) or {}
-        applicant = ApplicantInfo(
-            username=applicant_raw.get("username"),
-            lastname=applicant_raw.get("lastname"),
-            institute=applicant_raw.get("institute"),
-            email=applicant_raw.get("email"),
-            user_id=applicant_raw.get("userId"),
-        )
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected JSON object in {metadata_file}")
 
-        return BeamtimeInfo(
-            beamtime_id=str(data.get("beamtimeId", beamtime_id)),
-            beamline=data.get("beamline"),
-            beamline_alias=data.get("beamlineAlias"),
-            beamline_setup=data.get("beamtimeSetup") or data.get("beamlineSetup"),
-            facility=data.get("facility"),
-            proposal_id=data.get("proposalId"),
-            proposal_type=data.get("proposalType"),
-            event_start=data.get("eventStart"),
-            event_end=data.get("eventEnd"),
-            generated=data.get("generated"),
-            core_path=(
-                Path(data["corePath"])
-                if data.get("corePath")
-                else beamtime_root
-            ),
-            applicant=applicant,
-        )
+        metadata_id = data.get("beamtimeId")
+        if metadata_id is not None and str(metadata_id) != root.name:
+            raise ValueError(
+                f"Beamtime ID {metadata_id!r} does not match directory "
+                f"{root.name!r}: {metadata_file}"
+            )
 
-    def inspect_beamtime_structure(self, beamtime_root: Path) -> BeamtimeInspection:
-        raw_dir = beamtime_root / "raw"
-        processed_dir = beamtime_root / "processed"
-        scratch_cc_dir = beamtime_root / "scratch_cc"
-        shared_dir = beamtime_root / "shared"
+        return data, text
+
+    def inspect_storage(
+        self,
+        root: Path,
+        previous: BeamtimeStorage,
+    ) -> BeamtimeStorage:
+        raw = root / "raw"
+        processed = root / "processed"
+        scratch = root / "scratch_cc"
+        shared = root / "shared"
 
         raw_subdirs: list[str] = []
-        if raw_dir.exists() and raw_dir.is_dir():
+        if raw.is_dir():
             try:
                 raw_subdirs = sorted(
-                    entry.name
-                    for entry in raw_dir.iterdir()
-                    if entry.is_dir()
+                    entry.name for entry in raw.iterdir() if entry.is_dir()
                 )
             except OSError:
-                raw_subdirs = []
+                # Do not turn an unreadable directory into a reported zero.
+                previous.raw_subdir_count = None
+                previous.raw_subdir_samples = None
+            else:
+                previous.raw_subdir_count = len(raw_subdirs)
+                previous.raw_subdir_samples = raw_subdirs[:12]
+        else:
+            previous.raw_subdir_count = 0
+            previous.raw_subdir_samples = []
 
-        return BeamtimeInspection(
-            beamtime_root=beamtime_root,
-            raw_exists=raw_dir.exists(),
-            processed_exists=processed_dir.exists(),
-            scratch_cc_exists=scratch_cc_dir.exists(),
-            shared_exists=shared_dir.exists(),
-            raw_subdir_count=len(raw_subdirs),
-            raw_subdir_samples=raw_subdirs[:12],
+        now = _now()
+        previous.on_gpfs = root.is_dir()
+        if previous.on_gpfs:
+            previous.last_on_gpfs = now
+        # A GPFS inspection tells us nothing about tape. Preserve on_tape.
+        previous.raw_exists = raw.is_dir()
+        previous.processed_exists = processed.is_dir()
+        previous.scratch_cc_exists = scratch.is_dir()
+        previous.shared_exists = shared.is_dir()
+        previous.scratch_cc_writable = (
+            os.access(scratch, os.W_OK) if scratch.is_dir() else False
         )
+        previous.last_inspected = now
+        return previous
 
     def dir_size_bytes(
         self,
         path: Path,
-        progress_callback=None,
+        progress_callback: ProgressCallback | None = None,
     ) -> int | None:
-        if not path.exists() or not path.is_dir():
+        if not path.is_dir():
             return None
+
+        if progress_callback is not None:
+            progress_callback(f"Counting size of {path}")
 
         total = 0
         try:
-            if progress_callback is not None:
-                progress_callback(f"Counting size of {path}")
-
             for item in path.rglob("*"):
                 try:
                     if item.is_file():
@@ -172,303 +181,415 @@ class ProjectManager:
         self.db = db
         self.beamtime_manager = BeamtimeManager()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def _project(self, project: LaupyProject | int) -> LaupyProject:
+        project_id = project if isinstance(project, int) else project.id
+        if project_id is None:
+            raise ValueError("Project has not been saved")
 
-    def get_project_info(self, location) -> ProjectInfo:
-        cache = self.db.get_project_cache(location.id)
-        if cache is None:
-            return self.refresh_project_metadata(location)
+        result = self.db.get_project(project_id)
+        if result is None:
+            raise ValueError(f"Project {project_id} does not exist")
+        return result
 
-        return self._compose_project_info(location, cache)
+    def get_project_info(self, project: LaupyProject | int) -> ProjectInfo:
+        """Read cached data without scanning the filesystem."""
+        project = self._project(project)
+        workspaces = self.db.list_workspaces_for_project(project.id)
+        linked = self.db.list_beamtimes_for_project(project.id)
+
+        return ProjectInfo(
+            project=project,
+            workspaces=workspaces,
+            beamtimes=[
+                BeamtimeDetail(
+                    beamtime=beamtime,
+                    storage=self.db.get_beamtime_storage(beamtime.id),
+                )
+                for beamtime in linked
+            ],
+        )
+
+    def register_project(
+        self,
+        path: Path,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> LaupyProject:
+        """Register a project even when it has no beamtime or workspace."""
+        path = Path(path).resolve()
+        existing = self.db.get_project_by_path(path)
+        if existing is not None:
+            return existing
+
+        project = self.db.add_project(
+            LaupyProject(
+                id=None,
+                name=name or path.name,
+                path=path,
+                description=description,
+            )
+        )
+        self.db.connection.commit()
+        return project
+
+    def register_workspace(
+        self,
+        project: LaupyProject | int,
+        path: Path,
+        description: str | None = None,
+    ) -> LaupyProjectWorkspace:
+        """Register one immediate child WD of a project.
+
+        This records an existing directory; it does not create one.
+        """
+        project = self._project(project)
+        path = Path(path).resolve()
+
+        if path.parent != project.path.resolve() or not path.is_dir():
+            raise ValueError(
+                "Workspace must be an existing immediate child directory "
+                "of the project"
+            )
+
+        existing = next(
+            (
+                workspace
+                for workspace in self.db.list_workspaces_for_project(project.id)
+                if workspace.path.resolve() == path
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+
+        workspace = self.db.add_workspace(
+            LaupyProjectWorkspace(
+                id=None,
+                project_id=project.id,
+                name=path.name,
+                path=path,
+                description=description,
+            )
+        )
+        self.db.connection.commit()
+        return workspace
+
+    def list_workspaces(
+        self,
+        project: LaupyProject | int,
+    ) -> list[LaupyProjectWorkspace]:
+        project = self._project(project)
+        return self.db.list_workspaces_for_project(project.id)
+
+    def _beamtime_from_metadata(
+        self,
+        root: Path,
+        data: dict[str, Any] | None,
+        metadata_text: str | None,
+        existing: Beamtime | None,
+    ) -> Beamtime:
+        """Preserve user description when refreshing external metadata."""
+        data = data or {}
+
+        def person(prefix: str) -> dict[str, str | None]:
+            value = data.get(prefix) or {}
+            if not isinstance(value, dict):
+                value = {}
+            return {
+                f"{prefix}_username": value.get("username"),
+                f"{prefix}_lastname": value.get("lastname"),
+                f"{prefix}_institute": value.get("institute"),
+                f"{prefix}_email": value.get("email"),
+                f"{prefix}_user_id": value.get("userId"),
+            }
+
+        users = data.get("users") or {}
+        if not isinstance(users, dict):
+            users = {}
+
+        core_path = data.get("corePath")
+        return Beamtime(
+            id=existing.id if existing else None,
+            beamtime_id=root.name,
+            beamline=data.get("beamline"),
+            beamline_alias=data.get("beamlineAlias"),
+            beamline_setup=(
+                data.get("beamtimeSetup") or data.get("beamlineSetup")
+            ),
+            facility=data.get("facility"),
+            proposal_id=data.get("proposalId"),
+            proposal_type=data.get("proposalType"),
+            event_start=data.get("eventStart"),
+            event_end=data.get("eventEnd"),
+            generated=data.get("generated"),
+            core_path=Path(core_path) if core_path else root,
+            contact=data.get("contact"),
+            retention_period=(
+                str(data["retentionPeriod"])
+                if data.get("retentionPeriod") is not None
+                else None
+            ),
+            title=data.get("title"),
+            description=existing.description if existing else None,
+            unix_id=(
+                str(data["unixId"])
+                if data.get("unixId") is not None
+                else None
+            ),
+            users_door_db=users.get("doorDb"),
+            users_special=users.get("special"),
+            users_unknown=users.get("unknown"),
+            metadata_json=metadata_text,
+            created_at=existing.created_at if existing else None,
+            **person("applicant"),
+            **person("leader"),
+            **person("pi"),
+        )
+
+    def scan_beamtime(
+        self,
+        root: Path,
+        progress_callback: ProgressCallback | None = None,
+    ) -> BeamtimeDetail:
+        """Scan a beamtime independently of any Laupy project."""
+        root = Path(root).resolve()
+        if not root.name.isdigit():
+            raise ValueError(f"Expected numeric beamtime directory: {root}")
+        if not root.is_dir():
+            raise ValueError(f"Beamtime directory does not exist: {root}")
+
+        if progress_callback is not None:
+            progress_callback(f"Reading beamtime metadata from {root}")
+
+        data, text = self.beamtime_manager.load_metadata(root)
+        existing = self.db.get_beamtime_by_key(root.name)
+
+        if data is None and existing is not None:
+            # Missing metadata must not erase an earlier successful scan.
+            beamtime = existing
+        else:
+            beamtime = self.db.add_beamtime(
+                self._beamtime_from_metadata(root, data, text, existing)
+            )
+
+        storage = self.db.get_beamtime_storage(beamtime.id)
+        storage = self.beamtime_manager.inspect_storage(
+            root,
+            storage or BeamtimeStorage(beamtime_id=beamtime.id),
+        )
+        self.db.upsert_beamtime_storage(storage)
+        self.db.connection.commit()
+
+        return BeamtimeDetail(beamtime=beamtime, storage=storage)
+
+    def link_beamtime(
+        self,
+        project: LaupyProject | int,
+        beamtime: Beamtime | int,
+    ) -> None:
+        """Explicitly associate an independent project with a beamtime."""
+        project = self._project(project)
+        beamtime_id = beamtime if isinstance(beamtime, int) else beamtime.id
+        if beamtime_id is None or self.db.get_beamtime(beamtime_id) is None:
+            raise ValueError(f"Beamtime {beamtime_id} does not exist")
+        self.db.link_beamtime_project(beamtime_id, project.id)
 
     def refresh_project_metadata(
         self,
-        location,
-        progress_callback=None,
+        project: LaupyProject | int,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProjectInfo:
-        path = location.path.resolve()
+        """Discover a GPFS beamtime when possible; never remove manual links."""
+        project = self._project(project)
+        root = self.beamtime_manager.find_beamtime_root(project.path)
 
-        if progress_callback is not None:
-            progress_callback("Refreshing beamtime metadata")
+        if root is not None and root.is_dir():
+            detail = self.scan_beamtime(root, progress_callback)
+            self.db.link_beamtime_project(detail.beamtime.id, project.id)
 
-        existing_cache = self.db.get_project_cache(location.id)
-        cache = existing_cache or ProjectCache(location_id=location.id)
-
-        beamtime_root = self.beamtime_manager.find_beamtime_root(path)
-        cache.beamtime_root = beamtime_root
-
-        beamtime_info = None
-        inspection = None
-
-        if beamtime_root is not None:
-            beamtime_info = self.beamtime_manager.load_beamtime_info(
-                beamtime_root
-            )
-            inspection = self.beamtime_manager.inspect_beamtime_structure(
-                beamtime_root
-            )
-
-        self._store_beamtime_info_in_cache(cache, beamtime_info)
-        self._store_inspection_structure_in_cache(cache, inspection)
-
-        if cache.last_inspected is None:
-            cache.last_inspected = datetime.now().isoformat(timespec="seconds")
-
-        self.db.upsert_project_cache(location.id, cache)
-        return self._compose_project_info(location, cache)
+        return self.get_project_info(project)
 
     def refresh_project_sizes(
         self,
-        location,
-        progress_callback=None,
+        project: LaupyProject | int,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProjectInfo:
-        path = location.path.resolve()
-
-        existing_cache = self.db.get_project_cache(location.id)
-        if existing_cache is None:
-            self.refresh_project_metadata(location)
-            existing_cache = self.db.get_project_cache(location.id)
-
-        cache = existing_cache or ProjectCache(location_id=location.id)
-
-        if progress_callback is not None:
-            progress_callback("Refreshing cached sizes")
-
-        cache.project_size_bytes = self.beamtime_manager.dir_size_bytes(
-            path,
-            progress_callback=progress_callback,
+        """Count the project only, not its linked beamtimes' storage."""
+        project = self._project(project)
+        size = self.beamtime_manager.dir_size_bytes(
+            project.path, progress_callback
         )
+        now = _now().isoformat(timespec="seconds")
+        self.db.connection.execute(
+            """
+            UPDATE laupy_project
+            SET project_size_bytes = ?,
+                project_size_bytes_timestamp = ?,
+                last_inspected = ?
+            WHERE id = ?
+            """,
+            (size, now, now, project.id),
+        )
+        self.db.connection.commit()
+        return self.get_project_info(project)
 
-        beamtime_root = cache.beamtime_root
-        if beamtime_root is not None:
-            raw_dir = beamtime_root / "raw"
-            processed_dir = beamtime_root / "processed"
-            scratch_cc_dir = beamtime_root / "scratch_cc"
+    def refresh_workspace_size(
+        self,
+        workspace: LaupyProjectWorkspace | int,
+        progress_callback: ProgressCallback | None = None,
+    ) -> LaupyProjectWorkspace:
+        workspace_id = (
+            workspace if isinstance(workspace, int) else workspace.id
+        )
+        stored = self.db.get_workspace(workspace_id)
+        if stored is None:
+            raise ValueError(f"Workspace {workspace_id} does not exist")
 
-            cache.raw_size_bytes = self.beamtime_manager.dir_size_bytes(
-                raw_dir,
-                progress_callback=progress_callback,
+        size = self.beamtime_manager.dir_size_bytes(
+            stored.path, progress_callback
+        )
+        now = _now().isoformat(timespec="seconds")
+        self.db.connection.execute(
+            """
+            UPDATE laupy_project_workspace
+            SET workspace_size_bytes = ?,
+                workspace_size_bytes_timestamp = ?,
+                last_inspected = ?
+            WHERE id = ?
+            """,
+            (size, now, now, stored.id),
+        )
+        self.db.connection.commit()
+        return self.db.get_workspace(stored.id)
+
+    def refresh_beamtime_sizes(
+        self,
+        beamtime: Beamtime | int,
+        progress_callback: ProgressCallback | None = None,
+    ) -> BeamtimeStorage:
+        """Explicit operation: may be expensive on a large beamtime."""
+        beamtime_id = beamtime if isinstance(beamtime, int) else beamtime.id
+        stored = self.db.get_beamtime(beamtime_id)
+        if stored is None or stored.core_path is None:
+            raise ValueError(
+                f"Beamtime {beamtime_id} has no known storage path"
             )
-            cache.processed_size_bytes = self.beamtime_manager.dir_size_bytes(
-                processed_dir,
-                progress_callback=progress_callback,
-            )
-            cache.scratch_cc_size_bytes = self.beamtime_manager.dir_size_bytes(
-                scratch_cc_dir,
-                progress_callback=progress_callback,
-            )
 
-        cache.last_inspected = datetime.now().isoformat(timespec="seconds")
-        self.db.upsert_project_cache(location.id, cache)
+        root = stored.core_path
+        storage = self.db.get_beamtime_storage(stored.id)
+        storage = storage or BeamtimeStorage(beamtime_id=stored.id)
 
-        return self._compose_project_info(location, cache)
+        for subdir, size_field, timestamp_field in (
+            ("raw", "raw_size_bytes", "raw_size_bytes_timestamp"),
+            ("processed", "processed_size_bytes",
+             "processed_size_bytes_timestamp"),
+            ("scratch_cc", "scratch_cc_size_bytes",
+             "scratch_cc_size_bytes_timestamp"),
+        ):
+            size = self.beamtime_manager.dir_size_bytes(
+                root / subdir, progress_callback
+            )
+            setattr(storage, size_field, size)
+            setattr(storage, timestamp_field, _now() if size is not None else None)
+
+        storage.last_inspected = _now()
+        self.db.upsert_beamtime_storage(storage)
+        self.db.connection.commit()
+        return storage
 
     def refresh_project_cache(
         self,
-        location,
-        progress_callback=None,
+        project: LaupyProject | int,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProjectInfo:
-        self.refresh_project_metadata(
-            location,
-            progress_callback=progress_callback,
-        )
-        return self.refresh_project_sizes(
-            location,
-            progress_callback=progress_callback,
-        )
+        self.refresh_project_metadata(project, progress_callback)
+        return self.refresh_project_sizes(project, progress_callback)
 
     def refresh_project_sizes_threadsafe(
         self,
-        location,
-        progress_callback=None,
+        project: LaupyProject | int,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProjectInfo:
+        project_id = project if isinstance(project, int) else project.id
         thread_db = LaupyDB(self.db.db_path)
         try:
-            thread_location = thread_db.get_location(location.id)
-            thread_manager = ProjectManager(thread_db)
-            return thread_manager.refresh_project_sizes(
-                thread_location,
-                progress_callback=progress_callback,
+            return ProjectManager(thread_db).refresh_project_sizes(
+                project_id, progress_callback
             )
         finally:
-            thread_db.connection.close()
+            thread_db.close()
 
     def refresh_project_cache_threadsafe(
         self,
-        location,
-        progress_callback=None,
+        project: LaupyProject | int,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProjectInfo:
+        project_id = project if isinstance(project, int) else project.id
         thread_db = LaupyDB(self.db.db_path)
         try:
-            thread_location = thread_db.get_location(location.id)
-            thread_manager = ProjectManager(thread_db)
-            return thread_manager.refresh_project_cache(
-                thread_location,
-                progress_callback=progress_callback,
+            return ProjectManager(thread_db).refresh_project_cache(
+                project_id, progress_callback
             )
         finally:
-            thread_db.connection.close()
+            thread_db.close()
 
-    def invalidate_project_cache(self, location_id: int) -> None:
-        self.db.clear_project_cache(location_id)
-
-    # ------------------------------------------------------------------
-    # Composition helpers
-    # ------------------------------------------------------------------
-
-    def _compose_project_info(
+    def record_project_open(
         self,
-        location,
-        cache: ProjectCache | None,
-    ) -> ProjectInfo:
-        beamtime_info = None
-        inspection = None
-        project_size_bytes = None
-        last_inspected = None
-
-        if cache is not None:
-            beamtime_info = self._beamtime_info_from_cache(cache)
-            inspection = self._inspection_from_cache(cache)
-            project_size_bytes = cache.project_size_bytes
-            last_inspected = cache.last_inspected
-
-        return ProjectInfo(
-            location_id=location.id,
-            name=location.name,
-            path=location.path.resolve(),
-            description=getattr(location, "description", None),
-            project_size_bytes=project_size_bytes,
-            last_inspected=last_inspected,
-            beamtime_info=beamtime_info,
-            inspection=inspection,
+        project: LaupyProject | int,
+        workspace: LaupyProjectWorkspace | int | None = None,
+    ) -> None:
+        project = self._project(project)
+        workspace_id = (
+            workspace if isinstance(workspace, int)
+            else workspace.id if workspace is not None
+            else None
+        )
+        # The schema's composite FK rejects a workspace from another project.
+        self.db.add_history(
+            project_id=project.id,
+            workspace_id=workspace_id,
+            action="open",
         )
 
-    def _beamtime_info_from_cache(
-        self,
-        cache: ProjectCache,
-    ) -> BeamtimeInfo | None:
-        if cache.beamtime_id is None and cache.beamtime_root is None:
-            return None
+    def record_project_close(self) -> None:
+        self.db.add_history(
+            project_id=None,
+            workspace_id=None,
+            action="close",
+        )
 
-        applicant = None
-        applicant_values = [
-            cache.applicant_username,
-            cache.applicant_lastname,
-            cache.applicant_institute,
-            cache.applicant_email,
-            cache.applicant_user_id,
-        ]
-        if any(value is not None for value in applicant_values):
-            applicant = ApplicantInfo(
-                username=cache.applicant_username,
-                lastname=cache.applicant_lastname,
-                institute=cache.applicant_institute,
-                email=cache.applicant_email,
-                user_id=cache.applicant_user_id,
+    def current_project(self) -> LaupyProject | None:
+        """Unlike 'last non-null project', a close event clears this result."""
+        events = self.db.list_history(limit=1)
+        if not events or events[0].project_id is None:
+            return None
+        return self.db.get_project(events[0].project_id)
+
+    def sync_workspaces_from_disk(
+        self,
+        project: LaupyProject | int,
+    ) -> list[LaupyProjectWorkspace]:
+        """wd* directories currently on disk, registered for history/sizes.
+
+        Database rows whose directory has disappeared are not returned.
+        """
+        project = self._project(project)
+        try:
+            paths = sorted(
+                (
+                    entry
+                    for entry in project.path.iterdir()
+                    if entry.is_dir() and entry.name.startswith("wd")
+                ),
+                key=lambda path: path.name.lower(),
             )
+        except OSError:
+            return []
 
-        return BeamtimeInfo(
-            beamtime_id=cache.beamtime_id or "",
-            beamline=cache.beamline,
-            beamline_alias=cache.beamline_alias,
-            beamline_setup=cache.beamline_setup,
-            facility=cache.facility,
-            proposal_id=cache.proposal_id,
-            proposal_type=cache.proposal_type,
-            event_start=cache.event_start,
-            event_end=cache.event_end,
-            generated=cache.generated,
-            core_path=cache.beamtime_root,
-            applicant=applicant,
-        )
-
-    def _inspection_from_cache(
-        self,
-        cache: ProjectCache,
-    ) -> BeamtimeInspection | None:
-        if cache.beamtime_root is None:
-            return None
-
-        return BeamtimeInspection(
-            beamtime_root=cache.beamtime_root,
-            raw_exists=bool(cache.raw_exists) if cache.raw_exists is not None else False,
-            processed_exists=bool(cache.processed_exists) if cache.processed_exists is not None else False,
-            scratch_cc_exists=bool(cache.scratch_cc_exists) if cache.scratch_cc_exists is not None else False,
-            shared_exists=bool(cache.shared_exists) if cache.shared_exists is not None else False,
-            raw_subdir_count=cache.raw_subdir_count or 0,
-            raw_subdir_samples=cache.raw_subdir_samples or [],
-            raw_size_bytes=cache.raw_size_bytes,
-            processed_size_bytes=cache.processed_size_bytes,
-            scratch_cc_size_bytes=cache.scratch_cc_size_bytes,
-        )
-
-    def _store_beamtime_info_in_cache(
-        self,
-        cache: ProjectCache,
-        beamtime_info: BeamtimeInfo | None,
-    ) -> None:
-        if beamtime_info is None:
-            cache.beamtime_id = None
-            cache.beamline = None
-            cache.beamline_alias = None
-            cache.beamline_setup = None
-            cache.facility = None
-            cache.proposal_id = None
-            cache.proposal_type = None
-            cache.event_start = None
-            cache.event_end = None
-            cache.generated = None
-            cache.applicant_username = None
-            cache.applicant_lastname = None
-            cache.applicant_institute = None
-            cache.applicant_email = None
-            cache.applicant_user_id = None
-            return
-
-        cache.beamtime_id = beamtime_info.beamtime_id
-        cache.beamline = beamtime_info.beamline
-        cache.beamline_alias = beamtime_info.beamline_alias
-        cache.beamline_setup = beamtime_info.beamline_setup
-        cache.facility = beamtime_info.facility
-        cache.proposal_id = beamtime_info.proposal_id
-        cache.proposal_type = beamtime_info.proposal_type
-        cache.event_start = beamtime_info.event_start
-        cache.event_end = beamtime_info.event_end
-        cache.generated = beamtime_info.generated
-
-        applicant = beamtime_info.applicant
-        if applicant is None:
-            cache.applicant_username = None
-            cache.applicant_lastname = None
-            cache.applicant_institute = None
-            cache.applicant_email = None
-            cache.applicant_user_id = None
-        else:
-            cache.applicant_username = applicant.username
-            cache.applicant_lastname = applicant.lastname
-            cache.applicant_institute = applicant.institute
-            cache.applicant_email = applicant.email
-            cache.applicant_user_id = applicant.user_id
-
-    def _store_inspection_structure_in_cache(
-        self,
-        cache: ProjectCache,
-        inspection: BeamtimeInspection | None,
-    ) -> None:
-        if inspection is None:
-            cache.raw_exists = None
-            cache.processed_exists = None
-            cache.scratch_cc_exists = None
-            cache.shared_exists = None
-            cache.raw_subdir_count = None
-            cache.raw_subdir_samples = None
-            return
-
-        cache.raw_exists = inspection.raw_exists
-        cache.processed_exists = inspection.processed_exists
-        cache.scratch_cc_exists = inspection.scratch_cc_exists
-        cache.shared_exists = inspection.shared_exists
-        cache.raw_subdir_count = inspection.raw_subdir_count
-        cache.raw_subdir_samples = inspection.raw_subdir_samples
+        workspaces = []
+        for path in paths:
+            try:
+                workspaces.append(self.register_workspace(project, path))
+            except (OSError, ValueError, sqlite3.Error):
+                continue
+        return workspaces

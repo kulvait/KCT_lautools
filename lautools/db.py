@@ -1,25 +1,50 @@
+from __future__ import annotations
+
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
+from typing import Any, Iterator
+
+
+def _now() -> datetime:
+    return datetime.now().replace(microsecond=0)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat(timespec="seconds") if value is not None else None
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _json_loads(value: str | None) -> Any:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def _json_dumps(value: Any) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value)
 
 
 @dataclass
-class Location:
-    id: int
-    name: str
-    path: Path
-    last_access: datetime | None
-    description: str | None
-    last_selected: bool
-
-
-@dataclass
-class ProjectCache:
-    location_id: int
-    beamtime_root: Path | None = None
-    beamtime_id: str | None = None
+class Beamtime:
+    id: int | None
+    beamtime_id: str
     beamline: str | None = None
     beamline_alias: str | None = None
     beamline_setup: str | None = None
@@ -29,500 +54,888 @@ class ProjectCache:
     event_start: str | None = None
     event_end: str | None = None
     generated: str | None = None
+    core_path: Path | None = None
     applicant_username: str | None = None
     applicant_lastname: str | None = None
     applicant_institute: str | None = None
     applicant_email: str | None = None
     applicant_user_id: str | None = None
+    contact: str | None = None
+    leader_username: str | None = None
+    leader_lastname: str | None = None
+    leader_institute: str | None = None
+    leader_email: str | None = None
+    leader_user_id: str | None = None
+    pi_username: str | None = None
+    pi_lastname: str | None = None
+    pi_institute: str | None = None
+    pi_email: str | None = None
+    pi_user_id: str | None = None
+    retention_period: str | None = None
+    title: str | None = None
+    description: str | None = None
+    unix_id: str | None = None
+    users_door_db: Any = None
+    users_special: Any = None
+    users_unknown: Any = None
+    metadata_json: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass
+class BeamtimeStorage:
+    beamtime_id: int
+    on_gpfs: bool | None = None
+    on_tape: bool | None = None
+    last_on_gpfs: datetime | None = None
     raw_exists: bool | None = None
-    processed_exists: bool | None = None
-    scratch_cc_exists: bool | None = None
-    shared_exists: bool | None = None
     raw_subdir_count: int | None = None
     raw_subdir_samples: list[str] | None = None
-    project_size_bytes: int | None = None
     raw_size_bytes: int | None = None
+    raw_size_bytes_timestamp: datetime | None = None
+    processed_exists: bool | None = None
     processed_size_bytes: int | None = None
+    processed_size_bytes_timestamp: datetime | None = None
+    scratch_cc_exists: bool | None = None
+    scratch_cc_writable: bool | None = None
     scratch_cc_size_bytes: int | None = None
-    last_inspected: str | None = None
+    scratch_cc_size_bytes_timestamp: datetime | None = None
+    shared_exists: bool | None = None
+    last_inspected: datetime | None = None
+
+
+@dataclass
+class LaupyProject:
+    id: int | None
+    name: str
+    path: Path
+    description: str | None = None
+    created_at: datetime | None = None
+    project_size_bytes: int | None = None
+    project_size_bytes_timestamp: datetime | None = None
+    last_inspected: datetime | None = None
+
+
+@dataclass
+class LaupyProjectWorkspace:
+    id: int | None
+    project_id: int
+    name: str
+    path: Path
+    description: str | None = None
+    created_at: datetime | None = None
+    workspace_size_bytes: int | None = None
+    workspace_size_bytes_timestamp: datetime | None = None
+    last_inspected: datetime | None = None
+
+
+@dataclass
+class BeamtimeProjectLink:
+    beamtime_id: int
+    project_id: int
+    created_at: datetime | None = None
+
+
+@dataclass
+class ListedBeamtime:
+    beamtime_id: int
+    listed_at: datetime | None = None
+    last_access: datetime | None = None
+    pinned: bool = False
+
+
+@dataclass
+class ListedProject:
+    project_id: int
+    listed_at: datetime | None = None
+    last_access: datetime | None = None
+    pinned: bool = False
+
+
+@dataclass
+class AppHistory:
+    id: int | None
+    opened_at: datetime | None = None
+    project_id: int | None = None
+    workspace_id: int | None = None
+    action: str | None = None
 
 
 class LaupyDB:
     def __init__(self, db_path: Path):
-        self.db_path = db_path
+        self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.connection = sqlite3.connect(self.db_path)
-        self.connection.execute("""
-            CREATE TABLE IF NOT EXISTS locations (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                last_access TEXT,
-                description TEXT,
-                last_selected INTEGER NOT NULL DEFAULT 0,
-                last_working_directory TEXT
-            )
-        """)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA foreign_keys = ON")
 
-        self.connection.execute("""
-            CREATE TABLE IF NOT EXISTS project_cache (
-                location_id INTEGER PRIMARY KEY,
-                beamtime_root TEXT,
-                beamtime_id TEXT,
+        self._init_schema()
+
+    def close(self) -> None:
+        self.connection.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        try:
+            yield
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def _init_schema(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS beamtime (
+                id INTEGER PRIMARY KEY,
+                beamtime_id TEXT NOT NULL UNIQUE,
+
                 beamline TEXT,
                 beamline_alias TEXT,
                 beamline_setup TEXT,
                 facility TEXT,
+
                 proposal_id TEXT,
                 proposal_type TEXT,
+
                 event_start TEXT,
                 event_end TEXT,
                 generated TEXT,
+
+                core_path TEXT,
+
                 applicant_username TEXT,
                 applicant_lastname TEXT,
                 applicant_institute TEXT,
                 applicant_email TEXT,
                 applicant_user_id TEXT,
+
+                contact TEXT,
+
+                leader_username TEXT,
+                leader_lastname TEXT,
+                leader_institute TEXT,
+                leader_email TEXT,
+                leader_user_id TEXT,
+
+                pi_username TEXT,
+                pi_lastname TEXT,
+                pi_institute TEXT,
+                pi_email TEXT,
+                pi_user_id TEXT,
+
+                retention_period TEXT,
+                title TEXT,
+                description TEXT,
+                unix_id TEXT,
+
+                users_door_db TEXT,
+                users_special TEXT,
+                users_unknown TEXT,
+
+                metadata_json TEXT,
+
+                created_at TEXT NOT NULL,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS beamtime_storage (
+                beamtime_id INTEGER PRIMARY KEY
+                    REFERENCES beamtime(id) ON DELETE CASCADE,
+
+                on_gpfs INTEGER,
+                on_tape INTEGER,
+                last_on_gpfs TEXT,
+
                 raw_exists INTEGER,
-                processed_exists INTEGER,
-                scratch_cc_exists INTEGER,
-                shared_exists INTEGER,
                 raw_subdir_count INTEGER,
                 raw_subdir_samples TEXT,
-                project_size_bytes INTEGER,
                 raw_size_bytes INTEGER,
+                raw_size_bytes_timestamp TEXT,
+
+                processed_exists INTEGER,
                 processed_size_bytes INTEGER,
+                processed_size_bytes_timestamp TEXT,
+
+                scratch_cc_exists INTEGER,
+                scratch_cc_writable INTEGER,
                 scratch_cc_size_bytes INTEGER,
+                scratch_cc_size_bytes_timestamp TEXT,
+
+                shared_exists INTEGER,
+
+                last_inspected TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS laupy_project (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                description TEXT,
+                created_at TEXT NOT NULL,
+
+                project_size_bytes INTEGER,
+                project_size_bytes_timestamp TEXT,
+                last_inspected TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS laupy_project_workspace (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL
+                    REFERENCES laupy_project(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                description TEXT,
+                created_at TEXT NOT NULL,
+
+                workspace_size_bytes INTEGER,
+                workspace_size_bytes_timestamp TEXT,
                 last_inspected TEXT,
-                FOREIGN KEY(location_id) REFERENCES locations(id)
-                    ON DELETE CASCADE
-            )
-        """)
 
-        # Handle databases created with older schemas.
-        columns = {
-            row[1]
-            for row in self.connection.execute(
-                "PRAGMA table_info(locations)"
-            )
+                UNIQUE (project_id, name),
+                UNIQUE (id, project_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS laupy_project_workspace_project_id_idx
+                ON laupy_project_workspace(project_id);
+
+            CREATE TABLE IF NOT EXISTS beamtime_project_link (
+                beamtime_id INTEGER NOT NULL
+                    REFERENCES beamtime(id) ON DELETE CASCADE,
+                project_id INTEGER NOT NULL
+                    REFERENCES laupy_project(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (beamtime_id, project_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS beamtime_project_link_project_id_idx
+                ON beamtime_project_link(project_id);
+
+            CREATE TABLE IF NOT EXISTS lautools_app_listed_beamtime (
+                beamtime_id INTEGER PRIMARY KEY
+                    REFERENCES beamtime(id) ON DELETE CASCADE,
+                listed_at TEXT NOT NULL,
+                last_access TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS lautools_app_listed_project (
+                project_id INTEGER PRIMARY KEY
+                    REFERENCES laupy_project(id) ON DELETE CASCADE,
+                listed_at TEXT NOT NULL,
+                last_access TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS lautools_app_history (
+                id INTEGER PRIMARY KEY,
+                opened_at TEXT NOT NULL,
+                project_id INTEGER
+                    REFERENCES laupy_project(id) ON DELETE CASCADE,
+                workspace_id INTEGER,
+                action TEXT,
+
+                FOREIGN KEY (workspace_id, project_id)
+                    REFERENCES laupy_project_workspace(id, project_id)
+                    ON DELETE CASCADE,
+
+                CHECK (workspace_id IS NULL OR project_id IS NOT NULL)
+            );
+
+            CREATE INDEX IF NOT EXISTS lautools_app_history_opened_at_idx
+                ON lautools_app_history(opened_at);
+
+            CREATE INDEX IF NOT EXISTS lautools_app_history_project_opened_at_idx
+                ON lautools_app_history(project_id, opened_at);
+            """
+        )
+        self.connection.commit()
+
+    def _row_to_beamtime(self, row) -> Beamtime:
+        return Beamtime(
+            id=row["id"],
+            beamtime_id=row["beamtime_id"],
+            beamline=row["beamline"],
+            beamline_alias=row["beamline_alias"],
+            beamline_setup=row["beamline_setup"],
+            facility=row["facility"],
+            proposal_id=row["proposal_id"],
+            proposal_type=row["proposal_type"],
+            event_start=row["event_start"],
+            event_end=row["event_end"],
+            generated=row["generated"],
+            core_path=Path(row["core_path"]) if row["core_path"] else None,
+            applicant_username=row["applicant_username"],
+            applicant_lastname=row["applicant_lastname"],
+            applicant_institute=row["applicant_institute"],
+            applicant_email=row["applicant_email"],
+            applicant_user_id=row["applicant_user_id"],
+            contact=row["contact"],
+            leader_username=row["leader_username"],
+            leader_lastname=row["leader_lastname"],
+            leader_institute=row["leader_institute"],
+            leader_email=row["leader_email"],
+            leader_user_id=row["leader_user_id"],
+            pi_username=row["pi_username"],
+            pi_lastname=row["pi_lastname"],
+            pi_institute=row["pi_institute"],
+            pi_email=row["pi_email"],
+            pi_user_id=row["pi_user_id"],
+            retention_period=row["retention_period"],
+            title=row["title"],
+            description=row["description"],
+            unix_id=row["unix_id"],
+            users_door_db=_json_loads(row["users_door_db"]),
+            users_special=_json_loads(row["users_special"]),
+            users_unknown=_json_loads(row["users_unknown"]),
+            metadata_json=row["metadata_json"],
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+        )
+
+    def _row_to_storage(self, row) -> BeamtimeStorage:
+        return BeamtimeStorage(
+            beamtime_id=row["beamtime_id"],
+            on_gpfs=bool(row["on_gpfs"]) if row["on_gpfs"] is not None else None,
+            on_tape=bool(row["on_tape"]) if row["on_tape"] is not None else None,
+            last_on_gpfs=_parse_dt(row["last_on_gpfs"]),
+            raw_exists=bool(row["raw_exists"]) if row["raw_exists"] is not None else None,
+            raw_subdir_count=row["raw_subdir_count"],
+            raw_subdir_samples=_json_loads(row["raw_subdir_samples"]),
+            raw_size_bytes=row["raw_size_bytes"],
+            raw_size_bytes_timestamp=_parse_dt(row["raw_size_bytes_timestamp"]),
+            processed_exists=bool(row["processed_exists"]) if row["processed_exists"] is not None else None,
+            processed_size_bytes=row["processed_size_bytes"],
+            processed_size_bytes_timestamp=_parse_dt(row["processed_size_bytes_timestamp"]),
+            scratch_cc_exists=bool(row["scratch_cc_exists"]) if row["scratch_cc_exists"] is not None else None,
+            scratch_cc_writable=bool(row["scratch_cc_writable"]) if row["scratch_cc_writable"] is not None else None,
+            scratch_cc_size_bytes=row["scratch_cc_size_bytes"],
+            scratch_cc_size_bytes_timestamp=_parse_dt(row["scratch_cc_size_bytes_timestamp"]),
+            shared_exists=bool(row["shared_exists"]) if row["shared_exists"] is not None else None,
+            last_inspected=_parse_dt(row["last_inspected"]),
+        )
+
+    def _row_to_project(self, row) -> LaupyProject:
+        return LaupyProject(
+            id=row["id"],
+            name=row["name"],
+            path=Path(row["path"]),
+            description=row["description"],
+            created_at=_parse_dt(row["created_at"]),
+            project_size_bytes=row["project_size_bytes"],
+            project_size_bytes_timestamp=_parse_dt(row["project_size_bytes_timestamp"]),
+            last_inspected=_parse_dt(row["last_inspected"]),
+        )
+
+    def _row_to_workspace(self, row) -> LaupyProjectWorkspace:
+        return LaupyProjectWorkspace(
+            id=row["id"],
+            project_id=row["project_id"],
+            name=row["name"],
+            path=Path(row["path"]),
+            description=row["description"],
+            created_at=_parse_dt(row["created_at"]),
+            workspace_size_bytes=row["workspace_size_bytes"],
+            workspace_size_bytes_timestamp=_parse_dt(row["workspace_size_bytes_timestamp"]),
+            last_inspected=_parse_dt(row["last_inspected"]),
+        )
+
+    def _row_to_link(self, row) -> BeamtimeProjectLink:
+        return BeamtimeProjectLink(
+            beamtime_id=row["beamtime_id"],
+            project_id=row["project_id"],
+            created_at=_parse_dt(row["created_at"]),
+        )
+
+    def _row_to_listed_beamtime(self, row) -> ListedBeamtime:
+        return ListedBeamtime(
+            beamtime_id=row["beamtime_id"],
+            listed_at=_parse_dt(row["listed_at"]),
+            last_access=_parse_dt(row["last_access"]),
+            pinned=bool(row["pinned"]),
+        )
+
+    def _row_to_listed_project(self, row) -> ListedProject:
+        return ListedProject(
+            project_id=row["project_id"],
+            listed_at=_parse_dt(row["listed_at"]),
+            last_access=_parse_dt(row["last_access"]),
+            pinned=bool(row["pinned"]),
+        )
+
+    def _row_to_history(self, row) -> AppHistory:
+        return AppHistory(
+            id=row["id"],
+            opened_at=_parse_dt(row["opened_at"]),
+            project_id=row["project_id"],
+            workspace_id=row["workspace_id"],
+            action=row["action"],
+        )
+
+    def add_beamtime(self, beamtime: Beamtime) -> Beamtime:
+        now = _iso(_now())
+        params = {
+            "beamtime_id": beamtime.beamtime_id,
+            "beamline": beamtime.beamline,
+            "beamline_alias": beamtime.beamline_alias,
+            "beamline_setup": beamtime.beamline_setup,
+            "facility": beamtime.facility,
+            "proposal_id": beamtime.proposal_id,
+            "proposal_type": beamtime.proposal_type,
+            "event_start": beamtime.event_start,
+            "event_end": beamtime.event_end,
+            "generated": beamtime.generated,
+            "core_path": str(beamtime.core_path) if beamtime.core_path else None,
+            "applicant_username": beamtime.applicant_username,
+            "applicant_lastname": beamtime.applicant_lastname,
+            "applicant_institute": beamtime.applicant_institute,
+            "applicant_email": beamtime.applicant_email,
+            "applicant_user_id": beamtime.applicant_user_id,
+            "contact": beamtime.contact,
+            "leader_username": beamtime.leader_username,
+            "leader_lastname": beamtime.leader_lastname,
+            "leader_institute": beamtime.leader_institute,
+            "leader_email": beamtime.leader_email,
+            "leader_user_id": beamtime.leader_user_id,
+            "pi_username": beamtime.pi_username,
+            "pi_lastname": beamtime.pi_lastname,
+            "pi_institute": beamtime.pi_institute,
+            "pi_email": beamtime.pi_email,
+            "pi_user_id": beamtime.pi_user_id,
+            "retention_period": beamtime.retention_period,
+            "title": beamtime.title,
+            "description": beamtime.description,
+            "unix_id": beamtime.unix_id,
+            "users_door_db": _json_dumps(beamtime.users_door_db),
+            "users_special": _json_dumps(beamtime.users_special),
+            "users_unknown": _json_dumps(beamtime.users_unknown),
+            "metadata_json": beamtime.metadata_json,
+            "created_at": _iso(beamtime.created_at or _now()),
+            "updated_at": now,
         }
-
-        if "last_access" not in columns:
-            self.connection.execute(
-                "ALTER TABLE locations ADD COLUMN last_access TEXT"
-            )
-
-        if "description" not in columns:
-            self.connection.execute(
-                "ALTER TABLE locations ADD COLUMN description TEXT"
-            )
-
-        if "last_selected" not in columns:
-            self.connection.execute(
-                "ALTER TABLE locations "
-                "ADD COLUMN last_selected INTEGER NOT NULL DEFAULT 0"
-            )
-
-        if "last_working_directory" not in columns:
-            self.connection.execute(
-                "ALTER TABLE locations "
-                "ADD COLUMN last_working_directory TEXT"
-            )
-
-        self.connection.commit()
-
-    def _row_to_location(self, row) -> Location:
-        return Location(
-            id=row[0],
-            name=row[1],
-            path=Path(row[2]),
-            last_access=(
-                datetime.fromisoformat(row[3])
-                if row[3] is not None
-                else None
-            ),
-            description=row[4],
-            last_selected=bool(row[5]),
-        )
-
-    def _row_to_project_cache(self, row) -> ProjectCache:
-        return ProjectCache(
-            location_id=row[0],
-            beamtime_root=Path(row[1]) if row[1] else None,
-            beamtime_id=row[2],
-            beamline=row[3],
-            beamline_alias=row[4],
-            beamline_setup=row[5],
-            facility=row[6],
-            proposal_id=row[7],
-            proposal_type=row[8],
-            event_start=row[9],
-            event_end=row[10],
-            generated=row[11],
-            applicant_username=row[12],
-            applicant_lastname=row[13],
-            applicant_institute=row[14],
-            applicant_email=row[15],
-            applicant_user_id=row[16],
-            raw_exists=bool(row[17]) if row[17] is not None else None,
-            processed_exists=bool(row[18]) if row[18] is not None else None,
-            scratch_cc_exists=bool(row[19]) if row[19] is not None else None,
-            shared_exists=bool(row[20]) if row[20] is not None else None,
-            raw_subdir_count=row[21],
-            raw_subdir_samples=(
-                json.loads(row[22]) if row[22] else None
-            ),
-            project_size_bytes=row[23],
-            raw_size_bytes=row[24],
-            processed_size_bytes=row[25],
-            scratch_cc_size_bytes=row[26],
-            last_inspected=row[27],
-        )
-
-    def list_locations(self) -> list[Location]:
-        rows = self.connection.execute("""
-            SELECT id, name, path, last_access, description, last_selected
-            FROM locations
-            ORDER BY name
-        """).fetchall()
-
-        return [self._row_to_location(row) for row in rows]
-
-    def list_recent_locations(self) -> list[Location]:
-        rows = self.connection.execute("""
-            SELECT id, name, path, last_access, description, last_selected
-            FROM locations
-            ORDER BY
-                last_access IS NULL,
-                last_access DESC,
-                name
-        """).fetchall()
-
-        return [self._row_to_location(row) for row in rows]
-
-    def add_location(
-        self,
-        path: Path,
-        name: str | None = None,
-    ) -> Location | None:
-        path = path.resolve()
-
-        if name is None:
-            name = path.name
-
-        cursor = self.connection.execute(
+        self.connection.execute(
             """
-            INSERT OR IGNORE INTO locations
-                (name, path)
-            VALUES (?, ?)
-            """,
-            (name, str(path)),
-        )
-
-        self.connection.commit()
-
-        if cursor.rowcount == 0:
-            return None
-
-        return self.get_location_by_path(path)
-
-    def get_location(self, location_id: int) -> Location:
-        row = self.connection.execute("""
-            SELECT id, name, path, last_access, description, last_selected
-            FROM locations
-            WHERE id = ?
-        """, (location_id,)).fetchone()
-
-        if row is None:
-            raise ValueError(
-                f"Location {location_id} does not exist"
+            INSERT INTO beamtime (
+                beamtime_id, beamline, beamline_alias, beamline_setup, facility,
+                proposal_id, proposal_type, event_start, event_end, generated,
+                core_path, applicant_username, applicant_lastname,
+                applicant_institute, applicant_email, applicant_user_id,
+                contact, leader_username, leader_lastname, leader_institute,
+                leader_email, leader_user_id, pi_username, pi_lastname,
+                pi_institute, pi_email, pi_user_id, retention_period, title,
+                description, unix_id, users_door_db, users_special,
+                users_unknown, metadata_json, created_at, updated_at
+            ) VALUES (
+                :beamtime_id, :beamline, :beamline_alias, :beamline_setup, :facility,
+                :proposal_id, :proposal_type, :event_start, :event_end, :generated,
+                :core_path, :applicant_username, :applicant_lastname,
+                :applicant_institute, :applicant_email, :applicant_user_id,
+                :contact, :leader_username, :leader_lastname, :leader_institute,
+                :leader_email, :leader_user_id, :pi_username, :pi_lastname,
+                :pi_institute, :pi_email, :pi_user_id, :retention_period, :title,
+                :description, :unix_id, :users_door_db, :users_special,
+                :users_unknown, :metadata_json, :created_at, :updated_at
             )
-
-        return self._row_to_location(row)
-
-    def get_location_by_path(self, path: Path) -> Location | None:
-        row = self.connection.execute("""
-            SELECT id, name, path, last_access, description, last_selected
-            FROM locations
-            WHERE path = ?
-        """, (str(path.resolve()),)).fetchone()
-        if row is None:
-            return None
-        return self._row_to_location(row)
-
-    def get_last_selected_location(self) -> Location | None:
-        row = self.connection.execute("""
-            SELECT id, name, path, last_access, description, last_selected
-            FROM locations
-            WHERE last_selected = 1
-            ORDER BY id DESC
-            LIMIT 1
-        """).fetchone()
-        if row is None:
-            return None
-        return self._row_to_location(row)
-
-    def get_working_directory(self, location_id: int) -> str | None:
+            ON CONFLICT(beamtime_id) DO UPDATE SET
+                beamline=excluded.beamline,
+                beamline_alias=excluded.beamline_alias,
+                beamline_setup=excluded.beamline_setup,
+                facility=excluded.facility,
+                proposal_id=excluded.proposal_id,
+                proposal_type=excluded.proposal_type,
+                event_start=excluded.event_start,
+                event_end=excluded.event_end,
+                generated=excluded.generated,
+                core_path=excluded.core_path,
+                applicant_username=excluded.applicant_username,
+                applicant_lastname=excluded.applicant_lastname,
+                applicant_institute=excluded.applicant_institute,
+                applicant_email=excluded.applicant_email,
+                applicant_user_id=excluded.applicant_user_id,
+                contact=excluded.contact,
+                leader_username=excluded.leader_username,
+                leader_lastname=excluded.leader_lastname,
+                leader_institute=excluded.leader_institute,
+                leader_email=excluded.leader_email,
+                leader_user_id=excluded.leader_user_id,
+                pi_username=excluded.pi_username,
+                pi_lastname=excluded.pi_lastname,
+                pi_institute=excluded.pi_institute,
+                pi_email=excluded.pi_email,
+                pi_user_id=excluded.pi_user_id,
+                retention_period=excluded.retention_period,
+                title=excluded.title,
+                description=excluded.description,
+                unix_id=excluded.unix_id,
+                users_door_db=excluded.users_door_db,
+                users_special=excluded.users_special,
+                users_unknown=excluded.users_unknown,
+                metadata_json=excluded.metadata_json,
+                updated_at=excluded.updated_at
+            """,
+            params,
+        )
         row = self.connection.execute(
-            "SELECT last_working_directory FROM locations WHERE id = ?",
-            (location_id,),
+            "SELECT * FROM beamtime WHERE beamtime_id = ?",
+            (beamtime.beamtime_id,),
         ).fetchone()
-        return row[0] if row else None
+        return self._row_to_beamtime(row)
 
-    def set_working_directory(self, location_id: int, wd_name: str | None):
-        self.connection.execute(
-            "UPDATE locations SET last_working_directory = ? WHERE id = ?",
-            (wd_name, location_id),
-        )
-        self.connection.commit()
+    def get_beamtime(self, beamtime_id: int) -> Beamtime | None:
+        row = self.connection.execute(
+            "SELECT * FROM beamtime WHERE id = ?",
+            (beamtime_id,),
+        ).fetchone()
+        return self._row_to_beamtime(row) if row else None
 
-    def update_last_access(self, location_id: int):
-        now = datetime.now().isoformat(timespec="seconds")
+    def get_beamtime_by_key(self, beamtime_key: str) -> Beamtime | None:
+        row = self.connection.execute(
+            "SELECT * FROM beamtime WHERE beamtime_id = ?",
+            (beamtime_key,),
+        ).fetchone()
+        return self._row_to_beamtime(row) if row else None
 
-        self.connection.execute(
-            """
-            UPDATE locations
-            SET last_access = ?
-            WHERE id = ?
-            """,
-            (now, location_id),
-        )
+    def list_beamtimes(self) -> list[Beamtime]:
+        rows = self.connection.execute(
+            "SELECT * FROM beamtime ORDER BY beamtime_id"
+        ).fetchall()
+        return [self._row_to_beamtime(r) for r in rows]
 
-        self.connection.commit()
-
-    def rename_location(self, location_id: int, name: str):
-        name = name.strip()
-
-        if not name:
-            raise ValueError("Location name cannot be empty")
-
-        self.connection.execute(
-            """
-            UPDATE locations
-            SET name = ?
-            WHERE id = ?
-            """,
-            (name, location_id),
-        )
-
-        self.connection.commit()
-
-    def update_description(
+    def upsert_beamtime_storage(
         self,
-        location_id: int,
-        description: str | None,
-    ):
-        if description is not None:
-            description = description.strip()
-
-        if description == "":
-            description = None
-
+        storage: BeamtimeStorage,
+    ) -> BeamtimeStorage:
+        params = {
+            "beamtime_id": storage.beamtime_id,
+            "on_gpfs": int(storage.on_gpfs) if storage.on_gpfs is not None else None,
+            "on_tape": int(storage.on_tape) if storage.on_tape is not None else None,
+            "last_on_gpfs": _iso(storage.last_on_gpfs),
+            "raw_exists": int(storage.raw_exists) if storage.raw_exists is not None else None,
+            "raw_subdir_count": storage.raw_subdir_count,
+            "raw_subdir_samples": _json_dumps(storage.raw_subdir_samples),
+            "raw_size_bytes": storage.raw_size_bytes,
+            "raw_size_bytes_timestamp": _iso(storage.raw_size_bytes_timestamp),
+            "processed_exists": int(storage.processed_exists) if storage.processed_exists is not None else None,
+            "processed_size_bytes": storage.processed_size_bytes,
+            "processed_size_bytes_timestamp": _iso(storage.processed_size_bytes_timestamp),
+            "scratch_cc_exists": int(storage.scratch_cc_exists) if storage.scratch_cc_exists is not None else None,
+            "scratch_cc_writable": int(storage.scratch_cc_writable) if storage.scratch_cc_writable is not None else None,
+            "scratch_cc_size_bytes": storage.scratch_cc_size_bytes,
+            "scratch_cc_size_bytes_timestamp": _iso(storage.scratch_cc_size_bytes_timestamp),
+            "shared_exists": int(storage.shared_exists) if storage.shared_exists is not None else None,
+            "last_inspected": _iso(storage.last_inspected),
+        }
         self.connection.execute(
             """
-            UPDATE locations
-            SET description = ?
-            WHERE id = ?
+            INSERT INTO beamtime_storage (
+                beamtime_id, on_gpfs, on_tape, last_on_gpfs,
+                raw_exists, raw_subdir_count, raw_subdir_samples,
+                raw_size_bytes, raw_size_bytes_timestamp,
+                processed_exists, processed_size_bytes,
+                processed_size_bytes_timestamp,
+                scratch_cc_exists, scratch_cc_writable,
+                scratch_cc_size_bytes, scratch_cc_size_bytes_timestamp,
+                shared_exists, last_inspected
+            ) VALUES (
+                :beamtime_id, :on_gpfs, :on_tape, :last_on_gpfs,
+                :raw_exists, :raw_subdir_count, :raw_subdir_samples,
+                :raw_size_bytes, :raw_size_bytes_timestamp,
+                :processed_exists, :processed_size_bytes,
+                :processed_size_bytes_timestamp,
+                :scratch_cc_exists, :scratch_cc_writable,
+                :scratch_cc_size_bytes, :scratch_cc_size_bytes_timestamp,
+                :shared_exists, :last_inspected
+            )
+            ON CONFLICT(beamtime_id) DO UPDATE SET
+                on_gpfs=excluded.on_gpfs,
+                on_tape=excluded.on_tape,
+                last_on_gpfs=excluded.last_on_gpfs,
+                raw_exists=excluded.raw_exists,
+                raw_subdir_count=excluded.raw_subdir_count,
+                raw_subdir_samples=excluded.raw_subdir_samples,
+                raw_size_bytes=excluded.raw_size_bytes,
+                raw_size_bytes_timestamp=excluded.raw_size_bytes_timestamp,
+                processed_exists=excluded.processed_exists,
+                processed_size_bytes=excluded.processed_size_bytes,
+                processed_size_bytes_timestamp=excluded.processed_size_bytes_timestamp,
+                scratch_cc_exists=excluded.scratch_cc_exists,
+                scratch_cc_writable=excluded.scratch_cc_writable,
+                scratch_cc_size_bytes=excluded.scratch_cc_size_bytes,
+                scratch_cc_size_bytes_timestamp=excluded.scratch_cc_size_bytes_timestamp,
+                shared_exists=excluded.shared_exists,
+                last_inspected=excluded.last_inspected
             """,
-            (description, location_id),
+            params,
         )
+        row = self.connection.execute(
+            "SELECT * FROM beamtime_storage WHERE beamtime_id = ?",
+            (storage.beamtime_id,),
+        ).fetchone()
+        return self._row_to_storage(row)
 
-        self.connection.commit()
+    def get_beamtime_storage(self, beamtime_id: int) -> BeamtimeStorage | None:
+        row = self.connection.execute(
+            "SELECT * FROM beamtime_storage WHERE beamtime_id = ?",
+            (beamtime_id,),
+        ).fetchone()
+        return self._row_to_storage(row) if row else None
 
-    def set_last_selected(self, location_id: int):
-        self.connection.execute(
-            "UPDATE locations SET last_selected = 0"
-        )
+    def add_project(self, project: LaupyProject) -> LaupyProject:
+        params = {
+            "name": project.name,
+            "path": str(project.path),
+            "description": project.description,
+            "created_at": _iso(project.created_at or _now()),
+            "project_size_bytes": project.project_size_bytes,
+            "project_size_bytes_timestamp": _iso(project.project_size_bytes_timestamp),
+            "last_inspected": _iso(project.last_inspected),
+        }
         self.connection.execute(
             """
-            UPDATE locations
-            SET last_selected = 1
-            WHERE id = ?
+            INSERT INTO laupy_project (
+                name, path, description, created_at,
+                project_size_bytes, project_size_bytes_timestamp, last_inspected
+            ) VALUES (
+                :name, :path, :description, :created_at,
+                :project_size_bytes, :project_size_bytes_timestamp, :last_inspected
+            )
+            ON CONFLICT(path) DO UPDATE SET
+                name=excluded.name,
+                description=excluded.description,
+                project_size_bytes=excluded.project_size_bytes,
+                project_size_bytes_timestamp=excluded.project_size_bytes_timestamp,
+                last_inspected=excluded.last_inspected
             """,
-            (location_id,),
+            params,
         )
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project WHERE path = ?",
+            (str(project.path),),
+        ).fetchone()
+        return self._row_to_project(row)
 
-        self.connection.commit()
+    def get_project(self, project_id: int) -> LaupyProject | None:
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project WHERE id = ?",
+            (project_id,),
+        ).fetchone()
+        return self._row_to_project(row) if row else None
 
-    def remove_location(self, location_id: int):
+    def get_project_by_path(self, path: Path) -> LaupyProject | None:
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project WHERE path = ?",
+            (str(Path(path).resolve()),),
+        ).fetchone()
+        return self._row_to_project(row) if row else None
+
+    def list_projects(self) -> list[LaupyProject]:
+        rows = self.connection.execute(
+            "SELECT * FROM laupy_project ORDER BY name"
+        ).fetchall()
+        return [self._row_to_project(r) for r in rows]
+
+    def add_workspace(self, workspace: LaupyProjectWorkspace) -> LaupyProjectWorkspace:
+        params = {
+            "project_id": workspace.project_id,
+            "name": workspace.name,
+            "path": str(workspace.path),
+            "description": workspace.description,
+            "created_at": _iso(workspace.created_at or _now()),
+            "workspace_size_bytes": workspace.workspace_size_bytes,
+            "workspace_size_bytes_timestamp": _iso(workspace.workspace_size_bytes_timestamp),
+            "last_inspected": _iso(workspace.last_inspected),
+        }
         self.connection.execute(
-            "DELETE FROM project_cache WHERE location_id = ?",
-            (location_id,),
+            """
+            INSERT INTO laupy_project_workspace (
+                project_id, name, path, description, created_at,
+                workspace_size_bytes, workspace_size_bytes_timestamp, last_inspected
+            ) VALUES (
+                :project_id, :name, :path, :description, :created_at,
+                :workspace_size_bytes, :workspace_size_bytes_timestamp, :last_inspected
+            )
+            ON CONFLICT(path) DO UPDATE SET
+                project_id=excluded.project_id,
+                name=excluded.name,
+                description=excluded.description,
+                workspace_size_bytes=excluded.workspace_size_bytes,
+                workspace_size_bytes_timestamp=excluded.workspace_size_bytes_timestamp,
+                last_inspected=excluded.last_inspected
+            """,
+            params,
         )
-        self.connection.execute(
-            "DELETE FROM locations WHERE id = ?",
-            (location_id,),
-        )
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project_workspace WHERE path = ?",
+            (str(workspace.path),),
+        ).fetchone()
+        return self._row_to_workspace(row)
 
-        self.connection.commit()
+    def get_workspace(self, workspace_id: int) -> LaupyProjectWorkspace | None:
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project_workspace WHERE id = ?",
+            (workspace_id,),
+        ).fetchone()
+        return self._row_to_workspace(row) if row else None
 
-    def get_project_cache(self, location_id: int) -> ProjectCache | None:
-        row = self.connection.execute("""
-            SELECT
-                location_id,
-                beamtime_root,
-                beamtime_id,
-                beamline,
-                beamline_alias,
-                beamline_setup,
-                facility,
-                proposal_id,
-                proposal_type,
-                event_start,
-                event_end,
-                generated,
-                applicant_username,
-                applicant_lastname,
-                applicant_institute,
-                applicant_email,
-                applicant_user_id,
-                raw_exists,
-                processed_exists,
-                scratch_cc_exists,
-                shared_exists,
-                raw_subdir_count,
-                raw_subdir_samples,
-                project_size_bytes,
-                raw_size_bytes,
-                processed_size_bytes,
-                scratch_cc_size_bytes,
-                last_inspected
-            FROM project_cache
-            WHERE location_id = ?
-        """, (location_id,)).fetchone()
-
-        if row is None:
-            return None
-
-        return self._row_to_project_cache(row)
-
-    def upsert_project_cache(
+    def list_workspaces_for_project(
         self,
-        location_id: int,
-        cache: ProjectCache,
-    ):
-        raw_subdir_samples_json = None
-        if cache.raw_subdir_samples is not None:
-            raw_subdir_samples_json = json.dumps(
-                cache.raw_subdir_samples
-            )
+        project_id: int,
+    ) -> list[LaupyProjectWorkspace]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM laupy_project_workspace
+            WHERE project_id = ?
+            ORDER BY name
+            """,
+            (project_id,),
+        ).fetchall()
+        return [self._row_to_workspace(r) for r in rows]
 
+    def link_beamtime_project(self, beamtime_id: int, project_id: int) -> None:
         self.connection.execute(
             """
-            INSERT INTO project_cache (
-                location_id,
-                beamtime_root,
-                beamtime_id,
-                beamline,
-                beamline_alias,
-                beamline_setup,
-                facility,
-                proposal_id,
-                proposal_type,
-                event_start,
-                event_end,
-                generated,
-                applicant_username,
-                applicant_lastname,
-                applicant_institute,
-                applicant_email,
-                applicant_user_id,
-                raw_exists,
-                processed_exists,
-                scratch_cc_exists,
-                shared_exists,
-                raw_subdir_count,
-                raw_subdir_samples,
-                project_size_bytes,
-                raw_size_bytes,
-                processed_size_bytes,
-                scratch_cc_size_bytes,
-                last_inspected
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(location_id) DO UPDATE SET
-                beamtime_root = excluded.beamtime_root,
-                beamtime_id = excluded.beamtime_id,
-                beamline = excluded.beamline,
-                beamline_alias = excluded.beamline_alias,
-                beamline_setup = excluded.beamline_setup,
-                facility = excluded.facility,
-                proposal_id = excluded.proposal_id,
-                proposal_type = excluded.proposal_type,
-                event_start = excluded.event_start,
-                event_end = excluded.event_end,
-                generated = excluded.generated,
-                applicant_username = excluded.applicant_username,
-                applicant_lastname = excluded.applicant_lastname,
-                applicant_institute = excluded.applicant_institute,
-                applicant_email = excluded.applicant_email,
-                applicant_user_id = excluded.applicant_user_id,
-                raw_exists = excluded.raw_exists,
-                processed_exists = excluded.processed_exists,
-                scratch_cc_exists = excluded.scratch_cc_exists,
-                shared_exists = excluded.shared_exists,
-                raw_subdir_count = excluded.raw_subdir_count,
-                raw_subdir_samples = excluded.raw_subdir_samples,
-                project_size_bytes = excluded.project_size_bytes,
-                raw_size_bytes = excluded.raw_size_bytes,
-                processed_size_bytes = excluded.processed_size_bytes,
-                scratch_cc_size_bytes = excluded.scratch_cc_size_bytes,
-                last_inspected = excluded.last_inspected
+            INSERT OR IGNORE INTO beamtime_project_link (
+                beamtime_id, project_id, created_at
+            ) VALUES (?, ?, ?)
             """,
-            (
-                location_id,
-                str(cache.beamtime_root) if cache.beamtime_root else None,
-                cache.beamtime_id,
-                cache.beamline,
-                cache.beamline_alias,
-                cache.beamline_setup,
-                cache.facility,
-                cache.proposal_id,
-                cache.proposal_type,
-                cache.event_start,
-                cache.event_end,
-                cache.generated,
-                cache.applicant_username,
-                cache.applicant_lastname,
-                cache.applicant_institute,
-                cache.applicant_email,
-                cache.applicant_user_id,
-                (
-                    int(cache.raw_exists)
-                    if cache.raw_exists is not None
-                    else None
-                ),
-                (
-                    int(cache.processed_exists)
-                    if cache.processed_exists is not None
-                    else None
-                ),
-                (
-                    int(cache.scratch_cc_exists)
-                    if cache.scratch_cc_exists is not None
-                    else None
-                ),
-                (
-                    int(cache.shared_exists)
-                    if cache.shared_exists is not None
-                    else None
-                ),
-                cache.raw_subdir_count,
-                raw_subdir_samples_json,
-                cache.project_size_bytes,
-                cache.raw_size_bytes,
-                cache.processed_size_bytes,
-                cache.scratch_cc_size_bytes,
-                cache.last_inspected,
-            ),
+            (beamtime_id, project_id, _iso(_now())),
         )
-
         self.connection.commit()
 
-    def clear_project_cache(self, location_id: int):
+    def list_projects_for_beamtime(self, beamtime_id: int) -> list[LaupyProject]:
+        rows = self.connection.execute(
+            """
+            SELECT p.*
+            FROM laupy_project p
+            JOIN beamtime_project_link l ON l.project_id = p.id
+            WHERE l.beamtime_id = ?
+            ORDER BY p.name
+            """,
+            (beamtime_id,),
+        ).fetchall()
+        return [self._row_to_project(r) for r in rows]
+
+    def list_beamtimes_for_project(self, project_id: int) -> list[Beamtime]:
+        rows = self.connection.execute(
+            """
+            SELECT b.*
+            FROM beamtime b
+            JOIN beamtime_project_link l ON l.beamtime_id = b.id
+            WHERE l.project_id = ?
+            ORDER BY b.beamtime_id
+            """,
+            (project_id,),
+        ).fetchall()
+        return [self._row_to_beamtime(r) for r in rows]
+
+    def add_listed_beamtime(self, beamtime_id: int, pinned: bool = False) -> None:
         self.connection.execute(
-            "DELETE FROM project_cache WHERE location_id = ?",
-            (location_id,),
+            """
+            INSERT INTO lautools_app_listed_beamtime (
+                beamtime_id, listed_at, pinned
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(beamtime_id) DO UPDATE SET
+                listed_at=excluded.listed_at,
+                pinned=excluded.pinned
+            """,
+            (beamtime_id, _iso(_now()), int(pinned)),
         )
         self.connection.commit()
+
+    def add_listed_project(self, project_id: int, pinned: bool = False) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO lautools_app_listed_project (
+                project_id, listed_at, pinned
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                listed_at=excluded.listed_at,
+                pinned=excluded.pinned
+            """,
+            (project_id, _iso(_now()), int(pinned)),
+        )
+        self.connection.commit()
+
+    def add_history(
+        self,
+        project_id: int | None = None,
+        workspace_id: int | None = None,
+        action: str | None = None,
+        opened_at: datetime | None = None,
+    ) -> AppHistory:
+        self.connection.execute(
+            """
+            INSERT INTO lautools_app_history (
+                opened_at, project_id, workspace_id, action
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (_iso(opened_at or _now()), project_id, workspace_id, action),
+        )
+        self.connection.commit()
+        row = self.connection.execute(
+            "SELECT * FROM lautools_app_history ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return self._row_to_history(row)
+
+    def list_history(self, limit: int = 100) -> list[AppHistory]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM lautools_app_history
+            ORDER BY opened_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [self._row_to_history(r) for r in rows]
+
+    def last_project(self) -> LaupyProject | None:
+        row = self.connection.execute(
+            """
+            SELECT p.*
+            FROM lautools_app_history h
+            JOIN laupy_project p ON p.id = h.project_id
+            ORDER BY h.opened_at DESC, h.id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return self._row_to_project(row) if row else None
+
+    def last_workspace(self, project_id: int) -> LaupyProjectWorkspace | None:
+        row = self.connection.execute(
+            """
+            SELECT w.*
+            FROM lautools_app_history h
+            JOIN laupy_project_workspace w ON w.id = h.workspace_id
+            WHERE h.project_id = ?
+            ORDER BY h.opened_at DESC, h.id DESC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+        return self._row_to_workspace(row) if row else None
+
+    def list_listed_projects(self) -> list[LaupyProject]:
+        rows = self.connection.execute(
+            """
+            SELECT p.*
+            FROM laupy_project p
+            JOIN lautools_app_listed_project l ON l.project_id = p.id
+            ORDER BY l.pinned DESC, l.last_access IS NULL, l.last_access DESC,
+                     l.listed_at DESC
+            """
+        ).fetchall()
+        return [self._row_to_project(r) for r in rows]
+
+    def list_listed_beamtimes(self) -> list[Beamtime]:
+        rows = self.connection.execute(
+            """
+            SELECT b.*
+            FROM beamtime b
+            JOIN lautools_app_listed_beamtime l ON l.beamtime_id = b.id
+            ORDER BY l.pinned DESC, l.last_access IS NULL, l.last_access DESC,
+                     l.listed_at DESC
+            """
+        ).fetchall()
+        return [self._row_to_beamtime(r) for r in rows]
