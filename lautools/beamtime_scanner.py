@@ -1,7 +1,8 @@
-"""Discover beamtime directories without treating archive stubs as empty data."""
+"""Discover beamtime directories, including README-only archive stubs."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 import json
 import logging
@@ -39,22 +40,32 @@ class BeamtimeCandidate:
     scratch_cc_writable: bool
     has_metadata: bool
     readme_text: str | None = None
+    readme_mtime: datetime | None = None
 
     @property
     def archived(self) -> bool:
-        return self.readme_text is not None and "archived" in self.readme_text.lower()
+        return (
+            self.readme_text is not None
+            and "archived" in self.readme_text.lower()
+        )
+
+    @property
+    def has_data(self) -> bool:
+        """At least one data area is really present on GPFS."""
+        return self.raw_exists or self.processed_exists or self.scratch_cc_exists
+
+    @property
+    def is_stub(self) -> bool:
+        """Only a reference (metadata + README) remains; no data on GPFS."""
+        return (
+            not self.has_data
+            and self.readme_text is not None
+            and self.has_metadata
+        )
 
     @property
     def accepted(self) -> bool:
-        # A storage area is sufficient. A README-only archive stub must
-        # additionally have valid metadata so an arbitrary directory is not
-        # mistaken for a beamtime.
-        return (
-            self.raw_exists
-            or self.processed_exists
-            or self.scratch_cc_exists
-            or (self.readme_text is not None and self.has_metadata)
-        )
+        return self.has_data or self.is_stub
 
 
 @dataclass(frozen=True)
@@ -89,11 +100,16 @@ def _metadata_readable(path: Path) -> bool:
     return False
 
 
-def _read_readme(path: Path) -> str | None:
+def _read_readme(path: Path) -> tuple[str | None, datetime | None]:
+    readme = path / "README.txt"
     try:
-        return (path / "README.txt").read_text(encoding="utf-8")
+        text = readme.read_text(encoding="utf-8")
+        mtime = datetime.fromtimestamp(readme.stat().st_mtime).replace(
+            microsecond=0
+        )
     except (OSError, UnicodeError):
-        return None
+        return None, None
+    return text, mtime
 
 
 def _probe_writable(scratch: Path) -> bool:
@@ -153,9 +169,9 @@ def inspect_candidate(path: Path) -> BeamtimeCandidate | None:
     scratch_exists = scratch.is_dir()
     parts = path.parts
 
-    # README is relevant when scratch_cc is absent. It may also describe
-    # a beamtime that still has raw or processed data.
-    readme = _read_readme(path) if not scratch_exists else None
+    readme, readme_mtime = (
+        _read_readme(path) if not scratch_exists else (None, None)
+    )
     return BeamtimeCandidate(
         path=path,
         beamtime_id=path.name,
@@ -168,21 +184,21 @@ def inspect_candidate(path: Path) -> BeamtimeCandidate | None:
         scratch_cc_writable=_probe_writable(scratch) if scratch_exists else False,
         has_metadata=_metadata_readable(path),
         readme_text=readme,
+        readme_mtime=readme_mtime,
     )
 
 
 def scan_beamtimes(
     base: Path = DEFAULT_BASE,
-    writable_only: bool = False,
     numeric_ids_only: bool = True,
     listener: ScanListener | None = None,
     cancel: threading.Event | None = None,
     known_on_gpfs: Iterable[Path] = (),
 ) -> list[BeamtimeCandidate]:
-    """Scan disk; emit OFFLOADED only for demonstrably missing known roots.
+    """Scan everything below `base`.
 
-    An incomplete or unreadable tree cannot establish that an unseen
-    beamtime disappeared. OFFLOADED is not emitted on cancellation.
+    OFFLOADED is emitted only for known on-GPFS roots that demonstrably no
+    longer exist, never after cancellation or below unreadable branches.
     """
     base = Path(base)
     emit = listener or (lambda event: None)
@@ -225,9 +241,6 @@ def scan_beamtimes(
 
         candidate = inspect_candidate(path)
         if candidate is None or not candidate.accepted:
-            # Do not infer absence from an inaccessible or ambiguous root.
-            continue
-        if writable_only and not candidate.scratch_cc_writable:
             continue
 
         candidates.append(candidate)
@@ -244,15 +257,11 @@ def scan_beamtimes(
         ))
         return candidates
 
-    # If any branch was unreadable, no inference about missing entries
-    # under that branch is safe. In particular, do not mark an existing
-    # but unrecognized root as offloaded.
     for key, path in known.items():
         if key in seen:
             continue
         if any(
-            key == path_key(error)
-            or key.startswith(path_key(error) + os.sep)
+            key == path_key(error) or key.startswith(path_key(error) + os.sep)
             for error in errors
         ):
             continue
@@ -289,7 +298,6 @@ class BeamtimeScanner:
     def start(
         self,
         base: Path = DEFAULT_BASE,
-        writable_only: bool = False,
         numeric_ids_only: bool = True,
         known_on_gpfs: Iterable[Path] = (),
     ) -> None:
@@ -302,7 +310,6 @@ class BeamtimeScanner:
             try:
                 scan_beamtimes(
                     base=base,
-                    writable_only=writable_only,
                     numeric_ids_only=numeric_ids_only,
                     known_on_gpfs=known,
                     listener=self._listener,

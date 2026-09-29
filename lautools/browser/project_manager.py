@@ -107,16 +107,32 @@ class BeamtimeManager:
         if candidate is None or not candidate.accepted:
             raise ValueError(f"Not a recognizable beamtime directory: {root}")
 
+        now = _now()
+        if candidate.archived:
+            previous.on_tape = True
+
+        if candidate.is_stub:
+            # Only metadata + README remain: a reference, not data on GPFS.
+            # Keep sizes and raw sub-directory samples as last measured.
+            previous.on_gpfs = False
+            if candidate.readme_mtime is not None:
+                previous.last_on_gpfs = candidate.readme_mtime
+            previous.raw_exists = False
+            previous.processed_exists = False
+            previous.scratch_cc_exists = False
+            previous.scratch_cc_writable = False
+            previous.shared_exists = (root / "shared").is_dir()
+            previous.last_inspected = now
+            return previous
+
         raw = root / "raw"
-        scratch = root / "scratch_cc"
         if candidate.raw_exists:
             try:
                 subdirs = sorted(
                     entry.name for entry in raw.iterdir() if entry.is_dir()
                 )
             except OSError:
-                # Keep previously measured data on an inaccessible area.
-                pass
+                pass  # Keep previously recorded values.
             else:
                 previous.raw_subdir_count = len(subdirs)
                 previous.raw_subdir_samples = subdirs[:12]
@@ -124,12 +140,8 @@ class BeamtimeManager:
             previous.raw_subdir_count = 0
             previous.raw_subdir_samples = []
 
-        now = _now()
-        previous.on_gpfs = True  # The directory exists, including an archive stub.
+        previous.on_gpfs = True
         previous.last_on_gpfs = now
-        # A GPFS check alone does not prove data are on tape. The README can.
-        if candidate.archived:
-            previous.on_tape = True
         previous.raw_exists = candidate.raw_exists
         previous.processed_exists = candidate.processed_exists
         previous.scratch_cc_exists = candidate.scratch_cc_exists
@@ -327,7 +339,7 @@ class ProjectManager:
         progress_callback: ProgressCallback | None = None,
         candidate: BeamtimeCandidate | None = None,
     ) -> BeamtimeDetail:
-        """Update the database from one positively identified GPFS directory."""
+        """Update the database from one positively identified directory."""
         root = Path(os.path.abspath(root))
         if not root.name.isdigit():
             raise ValueError(f"Expected numeric beamtime directory: {root}")
@@ -340,21 +352,16 @@ class ProjectManager:
         existing = self.db.get_beamtime_by_key(root.name)
         try:
             data, text = self.beamtime_manager.load_metadata(root)
-        except (OSError, ValueError) as exc:
-            # A storage area is enough to recognize the directory. If
-            # metadata cannot be refreshed, retain previously stored data.
-            if existing is None:
-                data, text = None, None
-            else:
-                data, text = None, None
+        except (OSError, ValueError):
+            # Keep previously stored metadata if the file is unreadable now.
+            data, text = None, None
 
-        readme = candidate.readme_text if not candidate.scratch_cc_exists else None
+        readme = candidate.readme_text
         if data is None and existing is not None:
             beamtime = existing
             if readme is not None or beamtime.core_path != root:
-                beamtime.description = (
-                    readme if readme is not None else beamtime.description
-                )
+                if readme is not None:
+                    beamtime.description = readme
                 beamtime.core_path = root
                 beamtime = self.db.add_beamtime(beamtime)
         else:
@@ -575,3 +582,19 @@ class ProjectManager:
             except (OSError, ValueError, sqlite3.Error):
                 continue
         return workspaces
+
+    def listed_beamtime_ids(self) -> set[int]:
+        rows = self.db.connection.execute(
+            "SELECT beamtime_id FROM lautools_app_listed_beamtime"
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    def set_beamtime_listed(self, beamtime_id: int, listed: bool) -> None:
+        if listed:
+            self.db.add_listed_beamtime(beamtime_id)
+        else:
+            self.db.connection.execute(
+                "DELETE FROM lautools_app_listed_beamtime WHERE beamtime_id = ?",
+                (beamtime_id,),
+            )
+            self.db.connection.commit()
