@@ -28,6 +28,7 @@ from lautools.browser.create_wd_dialogs import (
     SampleSelectionDialog,
     script_command,
 )
+from lautools.browser.beamtime_list_dialog import BeamtimeListDialog
 from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
 from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.project_manager import ProjectManager
@@ -128,22 +129,22 @@ class BrowserWindow(QMainWindow):
 
     def _create_menu(self):
         menu_bar = self.menuBar()
-
+        # File
         file_menu = menu_bar.addMenu("&File")
-
         self.open_action = file_menu.addAction("Open Project...")
         self.open_action.setShortcut("Ctrl+O")
         self.open_action.triggered.connect(self.open_project)
-
         self.close_action = file_menu.addAction("Close Project")
         self.close_action.setShortcut("Ctrl+W")
         self.close_action.triggered.connect(self.close_project)
-
         file_menu.addSeparator()
-
         self.exit_action = file_menu.addAction("Exit App")
         self.exit_action.setShortcut("Ctrl+Q")
         self.exit_action.triggered.connect(self.close)
+        # Beamtime
+        beamtime_menu = menu_bar.addMenu("&Beamtime")
+        self.find_beamtimes_action = beamtime_menu.addAction("Find Beamtimes...")
+        self.find_beamtimes_action.triggered.connect(self.find_beamtimes)
 
         project_menu = menu_bar.addMenu("&Project")
 
@@ -1323,6 +1324,71 @@ class BrowserWindow(QMainWindow):
                     self.current_project.id
                 )
             self.status_label.setText(f"Sizes updated: {event.path}")
+
+    def find_beamtimes(self):
+        """Scan GPFS for accessible beamtimes and store the chosen ones."""
+        dialog = BeamtimeListDialog(self.project_manager, parent=self)
+        dialog.exec()
+
+        try:
+            count = len(self.db.list_beamtimes())
+        except Exception:
+            log.exception("Cannot count saved beamtimes")
+            return
+
+        self.status_label.setText(f"{count} beamtime(s) saved")
+
+    def _populate_beamtime_menu(self):
+        self.beamtime_list_menu.clear()
+
+        try:
+            beamtimes = self.db.list_listed_beamtimes()
+            if not beamtimes:
+                beamtimes = self.db.list_beamtimes()
+        except Exception:
+            log.exception("Cannot load beamtimes")
+            beamtimes = []
+
+        if not beamtimes:
+            action = self.beamtime_list_menu.addAction("(No saved beamtimes)")
+            action.setEnabled(False)
+            return
+
+        for beamtime in beamtimes:
+            label = beamtime.beamtime_id
+            if beamtime.title:
+                label += f" – {beamtime.title}"
+            action = self.beamtime_list_menu.addAction(label)
+            action.setToolTip(str(beamtime.core_path or ""))
+            action.triggered.connect(
+                lambda checked=False, bt=beamtime:
+                    self.open_beamtime_scratch(bt)
+            )
+
+    def open_beamtime_scratch(self, beamtime):
+        """Open the beamtime's scratch_cc as a project directory."""
+        if beamtime.core_path is None:
+            self.status_label.setText("Beamtime has no known path")
+            return
+
+        scratch = beamtime.core_path / "scratch_cc"
+        if not scratch.is_dir():
+            QMessageBox.warning(
+                self,
+                "scratch_cc unavailable",
+                f"The directory does not exist:\n{scratch}",
+            )
+            return
+
+        try:
+            project = self.project_manager.register_project(scratch)
+            self.project_manager.link_beamtime(project, beamtime)
+        except Exception as exc:
+            log.exception("Cannot open beamtime scratch: %s", scratch)
+            self.status_label.setText(f"Could not open beamtime: {exc}")
+            return
+
+        self._activate_project(project)
 
     def closeEvent(self, event):
         self.size_bridge.detach()
