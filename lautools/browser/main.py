@@ -5,6 +5,7 @@ pyQt6 GUI for Lautools
 import argparse
 import os
 import signal
+import logging
 from pathlib import Path
 
 from platformdirs import user_data_dir
@@ -12,12 +13,26 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
 from lautools.browser.browser_window import BrowserWindow
-from lautools.browser.db import LaupyDB
-from lautools import resources_pyside 
-
+from lautools.db import LaupyDB
+from lautools import resources_pyside
 
 APP_NAME = "laupy Browser"
 DEFAULT_DATABASE_NAME = "laupy_beamtimes.sqlite"
+
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+
+if not log.handlers:
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
+        datefmt="%d.%m.%Y %H:%M:%S",
+    )
+    ch.setFormatter(formatter)
+    log.addHandler(ch)
+
+log.propagate = False
 
 
 def get_database_path(appdb: str | None) -> Path:
@@ -31,9 +46,7 @@ def get_database_path(appdb: str | None) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="LauTools beamtime manager"
-    )
+    parser = argparse.ArgumentParser(description="LauTools beamtime manager")
     parser.add_argument(
         "--laupy-db",
         metavar="PATH",
@@ -87,7 +100,7 @@ def configure_qt_scaling(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     database_path = get_database_path(args.laupy_db)
-    print(f"Using database: {database_path}")
+    log.info(f"Using database: {database_path}")
 
     configure_qt_scaling(args)
 
