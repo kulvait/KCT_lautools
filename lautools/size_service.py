@@ -1,9 +1,4 @@
-"""Background directory-size service.
-
-Components request sizes by path. Worker threads count them, update every
-matching database row (projects, workspaces and beamtime storage areas) and
-notify subscribed listeners.
-"""
+"""Background directory-size service with conservative GPFS updates."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -20,7 +15,6 @@ import time
 from typing import Callable, Iterable
 
 log = logging.getLogger(__name__)
-
 BEAMTIME_AREAS = ("raw", "processed", "scratch_cc")
 MAX_WORKERS = 4
 
@@ -40,8 +34,6 @@ class SizeEvent:
     kind: SizeEventKind
     path: Path
     size_bytes: int | None = None
-    # Every directory size measured by this scan: the root, its immediate
-    # children and every registered project/workspace/beamtime area below it.
     sizes: dict[Path, int] = field(default_factory=dict)
     files_scanned: int = 0
     errors: int = 0
@@ -51,7 +43,6 @@ class SizeEvent:
     message: str | None = None
 
     def concerns(self, path: Path) -> bool:
-        """True if this event carries information about `path`."""
         path = Path(path)
         return path == self.path or path in self.sizes
 
@@ -96,12 +87,7 @@ def scan_directory(
     progress: Callable[[int, int], None] | None = None,
     progress_interval_s: float = 5.0,
 ) -> _ScanResult:
-    """Count apparent file sizes below `root` in a single pass.
-
-    Records the total for `root`, for each immediate child directory and for
-    every directory listed in `tracked`. Symlinks are not followed; hard-linked
-    files are counted once; unreadable entries increase `errors`.
-    """
+    """Count files once; report errors rather than publishing partial totals."""
     tracked_str = {str(p) for p in tracked}
     sizes: dict[str, int] = {}
     seen_inodes: set[tuple[int, int]] = set()
@@ -112,7 +98,6 @@ def scan_directory(
 
     def walk(path_str: str, depth: int) -> int:
         nonlocal files, errors, running_total, last_progress
-
         if cancel is not None and cancel.is_set():
             raise _Cancelled()
 
@@ -145,7 +130,6 @@ def scan_directory(
                 total += st.st_size
                 running_total += st.st_size
                 files += 1
-
                 if progress is not None:
                     now = time.monotonic()
                     if now - last_progress >= progress_interval_s:
@@ -166,8 +150,6 @@ def scan_directory(
 
 
 class SizeService:
-    """Queue of directory-size requests processed by a few worker threads."""
-
     def __init__(
         self,
         db_path: Path,
@@ -179,7 +161,6 @@ class SizeService:
         self.workers = max(1, min(int(workers), MAX_WORKERS))
         self.cooldown_s = cooldown_s
         self.progress_interval_s = progress_interval_s
-
         self._queue: queue.Queue[_Job | None] = queue.Queue()
         self._lock = threading.RLock()
         self._pending: dict[Path, _Job] = {}
@@ -189,10 +170,6 @@ class SizeService:
         self._threads: list[threading.Thread] = []
         self._cancel = threading.Event()
         self._seq = itertools.count()
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     def start(self) -> None:
         if self._threads:
@@ -208,7 +185,6 @@ class SizeService:
             self._threads.append(thread)
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Cancel running scans and stop workers."""
         self._cancel.set()
         for _ in self._threads:
             self._queue.put(None)
@@ -218,16 +194,7 @@ class SizeService:
         with self._lock:
             self._pending.clear()
 
-    # ------------------------------------------------------------------
-    # Listeners
-    # ------------------------------------------------------------------
-
     def subscribe(self, listener: SizeListener) -> Callable[[], None]:
-        """Register a listener; returns a function that unsubscribes it.
-
-        Listeners are called from worker threads (or from the requesting
-        thread for QUEUED/SKIPPED). GUI code must use the Qt bridge.
-        """
         with self._lock:
             self._listeners.append(listener)
 
@@ -235,7 +202,6 @@ class SizeService:
             with self._lock:
                 if listener in self._listeners:
                     self._listeners.remove(listener)
-
         return unsubscribe
 
     def _emit(self, event: SizeEvent) -> None:
@@ -247,51 +213,37 @@ class SizeService:
             except Exception:
                 log.exception("Size listener failed")
 
-    # ------------------------------------------------------------------
-    # Requests
-    # ------------------------------------------------------------------
-
     def request(self, path: Path, force: bool = False) -> bool:
-        """Queue a size count of `path`.
-
-        Returns True if queued (or already queued/running), False if skipped
-        because a result younger than the cooldown exists.
-        """
         path = _resolve(Path(path))
         skipped_size: int | None = None
-
         with self._lock:
             pending = self._pending.get(path)
             if pending is not None:
                 pending.force = pending.force or force
                 return True
-
             if path in self._running and not force:
                 return True
-
             if not force:
                 recent = self._recent.get(path)
                 if recent is not None:
                     age = time.monotonic() - recent[0]
                     if age < self.cooldown_s:
                         skipped_size = recent[1]
-
             if skipped_size is None:
                 job = _Job(path=path, force=force, seq=next(self._seq))
                 self._pending[path] = job
 
         if skipped_size is not None:
             self._emit(SizeEvent(
-                kind=SizeEventKind.SKIPPED,
+                SizeEventKind.SKIPPED,
                 path=path,
                 size_bytes=skipped_size,
                 sizes={path: skipped_size},
                 message=f"Counted less than {self.cooldown_s:.0f} s ago",
             ))
             return False
-
         self._queue.put(job)
-        self._emit(SizeEvent(kind=SizeEventKind.QUEUED, path=path))
+        self._emit(SizeEvent(SizeEventKind.QUEUED, path=path))
         return True
 
     def request_many(self, paths: Iterable[Path], force: bool = False) -> None:
@@ -304,22 +256,15 @@ class SizeService:
         areas: Iterable[str] = BEAMTIME_AREAS,
         force: bool = False,
     ) -> None:
-        """Queue beamtime areas. A scratch_cc scan also updates every
-        project and workspace below it."""
         for area in areas:
             if area not in BEAMTIME_AREAS:
                 raise ValueError(f"Unknown beamtime area: {area}")
             self.request(Path(core_path) / area, force=force)
 
     def cached_size(self, path: Path) -> int | None:
-        """Last size measured during this session, regardless of age."""
         with self._lock:
             recent = self._recent.get(_resolve(Path(path)))
         return recent[1] if recent else None
-
-    # ------------------------------------------------------------------
-    # Workers
-    # ------------------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30)
@@ -334,24 +279,20 @@ class SizeService:
                 job = self._queue.get()
                 if job is None or self._cancel.is_set():
                     break
-
                 with self._lock:
                     if self._pending.get(job.path) is job:
                         del self._pending[job.path]
                     self._running.add(job.path)
-
                 try:
                     if connection is None:
                         connection = self._connect()
                     self._run_job(connection, job)
                 except _Cancelled:
-                    self._emit(SizeEvent(
-                        kind=SizeEventKind.CANCELLED, path=job.path,
-                    ))
+                    self._emit(SizeEvent(SizeEventKind.CANCELLED, path=job.path))
                 except Exception as exc:
                     log.exception("Size count failed for %s", job.path)
                     self._emit(SizeEvent(
-                        kind=SizeEventKind.FAILED,
+                        SizeEventKind.FAILED,
                         path=job.path,
                         message=str(exc),
                     ))
@@ -362,23 +303,79 @@ class SizeService:
             if connection is not None:
                 connection.close()
 
+    @staticmethod
+    def _beamtime_owner(
+        connection: sqlite3.Connection, path: Path,
+    ) -> tuple[int, Path, bool | None] | None:
+        rows = connection.execute(
+            """
+            SELECT b.id, b.core_path, s.on_gpfs
+            FROM beamtime b
+            LEFT JOIN beamtime_storage s ON s.beamtime_id = b.id
+            WHERE b.core_path IS NOT NULL
+            """
+        ).fetchall()
+        for beamtime_id, core_path, on_gpfs in rows:
+            core = _resolve(Path(core_path))
+            if _is_within(path, core):
+                return beamtime_id, core, (
+                    bool(on_gpfs) if on_gpfs is not None else None
+                )
+        return None
+
+    @staticmethod
+    def _mark_offloaded(
+        connection: sqlite3.Connection, beamtime_id: int,
+    ) -> bool:
+        cursor = connection.execute(
+            """
+            UPDATE beamtime_storage
+            SET on_gpfs = 0, last_inspected = ?
+            WHERE beamtime_id = ? AND on_gpfs = 1
+            """,
+            (datetime.now().isoformat(timespec="seconds"), beamtime_id),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+
     def _run_job(self, connection: sqlite3.Connection, job: _Job) -> None:
         root = job.path
-        if not root.is_dir():
+        owner = self._beamtime_owner(connection, root)
+        if owner is not None and owner[2] is False:
             self._emit(SizeEvent(
-                kind=SizeEventKind.FAILED,
+                SizeEventKind.SKIPPED,
                 path=root,
-                message="Not an accessible directory",
+                message="Beamtime is not on GPFS; cached sizes preserved",
             ))
             return
 
-        self._emit(SizeEvent(kind=SizeEventKind.STARTED, path=root))
+        if not root.is_dir():
+            updated: tuple[int, ...] = ()
+            if owner is not None:
+                # A missing area is normal for a README archive stub.
+                # Only the disappearance of the *beamtime root* proves
+                # that on_gpfs should be cleared.
+                beamtime_id, core, was_on_gpfs = owner
+                if (
+                    was_on_gpfs is True
+                    and not core.exists()
+                    and self._mark_offloaded(connection, beamtime_id)
+                ):
+                    updated = (beamtime_id,)
+            self._emit(SizeEvent(
+                SizeEventKind.FAILED,
+                path=root,
+                updated_beamtimes=updated,
+                message="Not an accessible directory; cached sizes preserved",
+            ))
+            return
 
+        self._emit(SizeEvent(SizeEventKind.STARTED, path=root))
         tracked = self._tracked_paths(connection, root)
 
         def on_progress(size_bytes: int, files: int) -> None:
             self._emit(SizeEvent(
-                kind=SizeEventKind.PROGRESS,
+                SizeEventKind.PROGRESS,
                 path=root,
                 size_bytes=size_bytes,
                 files_scanned=files,
@@ -391,42 +388,47 @@ class SizeService:
             progress=on_progress,
             progress_interval_s=self.progress_interval_s,
         )
+        if result.errors:
+            # Never publish incomplete (possibly zero) measurements.
+            self._emit(SizeEvent(
+                SizeEventKind.FAILED,
+                path=root,
+                files_scanned=result.files,
+                errors=result.errors,
+                message="Incomplete size scan; cached sizes preserved",
+            ))
+            return
 
         projects, workspaces, beamtimes = self._store(connection, result)
-
         finished = time.monotonic()
         with self._lock:
             for path, size in result.sizes.items():
                 self._recent[path] = (finished, size)
 
         self._emit(SizeEvent(
-            kind=SizeEventKind.FINISHED,
+            SizeEventKind.FINISHED,
             path=root,
             size_bytes=result.total,
             sizes=result.sizes,
             files_scanned=result.files,
-            errors=result.errors,
             updated_projects=projects,
             updated_workspaces=workspaces,
             updated_beamtimes=beamtimes,
-            message=(
-                f"{result.errors} entries could not be read"
-                if result.errors else None
-            ),
         ))
-
-    # ------------------------------------------------------------------
-    # Database mapping (by path)
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _beamtime_areas(
         connection: sqlite3.Connection,
     ) -> list[tuple[int, str, Path]]:
-        """(beamtime row id, area name, resolved area path)."""
         areas = []
         rows = connection.execute(
-            "SELECT id, core_path FROM beamtime WHERE core_path IS NOT NULL"
+            """
+            SELECT b.id, b.core_path
+            FROM beamtime b
+            LEFT JOIN beamtime_storage s ON s.beamtime_id = b.id
+            WHERE b.core_path IS NOT NULL
+              AND COALESCE(s.on_gpfs, 1) = 1
+            """
         ).fetchall()
         for beamtime_id, core_path in rows:
             core = _resolve(Path(core_path))
@@ -447,7 +449,6 @@ class SizeService:
         ):
             candidates.append(Path(path))
         candidates.extend(p for _, _, p in self._beamtime_areas(connection))
-
         return {p for p in candidates if _is_within(p, root)}
 
     def _store(
@@ -499,7 +500,7 @@ class SizeService:
         per_beamtime: dict[int, dict[str, int]] = {}
         for beamtime_id, area, area_path in self._beamtime_areas(connection):
             size = sizes.get(str(area_path))
-            if size is not None:
+            if size is not None and area_path.is_dir():
                 per_beamtime.setdefault(beamtime_id, {})[area] = size
 
         for beamtime_id, area_sizes in per_beamtime.items():
@@ -511,7 +512,6 @@ class SizeService:
                 """,
                 (beamtime_id,),
             )
-            # Column names come from the fixed BEAMTIME_AREAS tuple.
             assignments = ", ".join(
                 f"{area}_size_bytes = ?, {area}_size_bytes_timestamp = ?"
                 for area in area_sizes
@@ -521,7 +521,7 @@ class SizeService:
                 params.extend([size, timestamp])
             connection.execute(
                 f"UPDATE beamtime_storage SET {assignments}, "
-                f"last_inspected = ? WHERE beamtime_id = ?",
+                f"last_inspected = ? WHERE beamtime_id = ? AND on_gpfs IS NOT 0",
                 (*params, timestamp, beamtime_id),
             )
 
@@ -529,7 +529,6 @@ class SizeService:
         return tuple(projects), tuple(workspaces), tuple(per_beamtime)
 
     def active_paths(self) -> dict[Path, str]:
-        """Paths currently queued or being counted."""
         with self._lock:
             state = {path: "queued" for path in self._pending}
             state.update({path: "running" for path in self._running})

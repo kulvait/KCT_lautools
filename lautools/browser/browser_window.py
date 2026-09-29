@@ -143,7 +143,7 @@ class BrowserWindow(QMainWindow):
         self.exit_action.triggered.connect(self.close)
         # Beamtime
         beamtime_menu = menu_bar.addMenu("&Beamtime")
-        self.find_beamtimes_action = beamtime_menu.addAction("Find Beamtimes...")
+        self.find_beamtimes_action = beamtime_menu.addAction("List Beamtimes...")
         self.find_beamtimes_action.triggered.connect(self.find_beamtimes)
 
         project_menu = menu_bar.addMenu("&Project")

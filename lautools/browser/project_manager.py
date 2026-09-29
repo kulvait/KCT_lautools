@@ -5,8 +5,10 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import sqlite3
 from typing import Any, Callable
 
+from lautools.beamtime_scanner import BeamtimeCandidate, inspect_candidate
 from lautools.db import (
     Beamtime,
     BeamtimeStorage,
@@ -24,16 +26,12 @@ def _now() -> datetime:
 
 @dataclass
 class BeamtimeDetail:
-    """A beamtime linked to a project, with its separately stored state."""
-
     beamtime: Beamtime
     storage: BeamtimeStorage | None
 
 
 @dataclass
 class ProjectInfo:
-    """Browser-facing view assembled from database rows."""
-
     project: LaupyProject
     workspaces: list[LaupyProjectWorkspace] = field(default_factory=list)
     beamtimes: list[BeamtimeDetail] = field(default_factory=list)
@@ -68,13 +66,7 @@ class BeamtimeManager:
     """Filesystem operations only; persistence belongs to ProjectManager."""
 
     def find_beamtime_root(self, path: Path) -> Path | None:
-        """Recognize .../gpfs/<a>/<b>/data/<numeric-id>/... paths.
-
-        An independent project outside that layout has no inferred beamtime.
-        It can still be linked explicitly with ProjectManager.link_beamtime().
-        """
         parts = path.resolve().parts
-
         for i, part in enumerate(parts):
             if (
                 part == "gpfs"
@@ -83,70 +75,67 @@ class BeamtimeManager:
                 and parts[i + 4].isdigit()
             ):
                 return Path(*parts[: i + 5])
-
         return None
 
     def load_metadata(self, root: Path) -> tuple[dict[str, Any] | None, str | None]:
-        metadata_file = root / f"beamtime-metadata-{root.name}.json"
-
-        try:
-            text = metadata_file.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None, None
-        except OSError:
-            raise
-
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError(f"Expected JSON object in {metadata_file}")
-
-        metadata_id = data.get("beamtimeId")
-        if metadata_id is not None and str(metadata_id) != root.name:
-            raise ValueError(
-                f"Beamtime ID {metadata_id!r} does not match directory "
-                f"{root.name!r}: {metadata_file}"
-            )
-
-        return data, text
+        """Accept both the usual filename and archive-stub metadata.json."""
+        for name in (f"beamtime-metadata-{root.name}.json", "metadata.json"):
+            metadata_file = root / name
+            try:
+                text = metadata_file.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError(f"Expected JSON object in {metadata_file}")
+            metadata_id = data.get("beamtimeId")
+            if metadata_id is not None and str(metadata_id) != root.name:
+                raise ValueError(
+                    f"Beamtime ID {metadata_id!r} does not match "
+                    f"directory {root.name!r}: {metadata_file}"
+                )
+            return data, text
+        return None, None
 
     def inspect_storage(
         self,
         root: Path,
         previous: BeamtimeStorage,
+        candidate: BeamtimeCandidate | None = None,
     ) -> BeamtimeStorage:
-        raw = root / "raw"
-        processed = root / "processed"
-        scratch = root / "scratch_cc"
-        shared = root / "shared"
+        candidate = candidate or inspect_candidate(root)
+        if candidate is None or not candidate.accepted:
+            raise ValueError(f"Not a recognizable beamtime directory: {root}")
 
-        raw_subdirs: list[str] = []
-        if raw.is_dir():
+        raw = root / "raw"
+        scratch = root / "scratch_cc"
+        if candidate.raw_exists:
             try:
-                raw_subdirs = sorted(
+                subdirs = sorted(
                     entry.name for entry in raw.iterdir() if entry.is_dir()
                 )
             except OSError:
-                # Do not turn an unreadable directory into a reported zero.
-                previous.raw_subdir_count = None
-                previous.raw_subdir_samples = None
+                # Keep previously measured data on an inaccessible area.
+                pass
             else:
-                previous.raw_subdir_count = len(raw_subdirs)
-                previous.raw_subdir_samples = raw_subdirs[:12]
+                previous.raw_subdir_count = len(subdirs)
+                previous.raw_subdir_samples = subdirs[:12]
         else:
             previous.raw_subdir_count = 0
             previous.raw_subdir_samples = []
 
         now = _now()
-        previous.on_gpfs = root.is_dir()
-        if previous.on_gpfs:
-            previous.last_on_gpfs = now
-        # A GPFS inspection tells us nothing about tape. Preserve on_tape.
-        previous.raw_exists = raw.is_dir()
-        previous.processed_exists = processed.is_dir()
-        previous.scratch_cc_exists = scratch.is_dir()
-        previous.shared_exists = shared.is_dir()
+        previous.on_gpfs = True  # The directory exists, including an archive stub.
+        previous.last_on_gpfs = now
+        # A GPFS check alone does not prove data are on tape. The README can.
+        if candidate.archived:
+            previous.on_tape = True
+        previous.raw_exists = candidate.raw_exists
+        previous.processed_exists = candidate.processed_exists
+        previous.scratch_cc_exists = candidate.scratch_cc_exists
+        previous.shared_exists = (root / "shared").is_dir()
         previous.scratch_cc_writable = (
-            os.access(scratch, os.W_OK) if scratch.is_dir() else False
+            candidate.scratch_cc_writable if candidate.scratch_cc_exists else False
         )
         previous.last_inspected = now
         return previous
@@ -158,7 +147,6 @@ class BeamtimeManager:
     ) -> int | None:
         if not path.is_dir():
             return None
-
         if progress_callback is not None:
             progress_callback(f"Counting size of {path}")
 
@@ -169,10 +157,10 @@ class BeamtimeManager:
                     if item.is_file():
                         total += item.stat().st_size
                 except OSError:
-                    continue
+                    # An incomplete scan is not a valid zero/small size.
+                    return None
         except OSError:
             return None
-
         return total
 
 
@@ -185,18 +173,15 @@ class ProjectManager:
         project_id = project if isinstance(project, int) else project.id
         if project_id is None:
             raise ValueError("Project has not been saved")
-
         result = self.db.get_project(project_id)
         if result is None:
             raise ValueError(f"Project {project_id} does not exist")
         return result
 
     def get_project_info(self, project: LaupyProject | int) -> ProjectInfo:
-        """Read cached data without scanning the filesystem."""
         project = self._project(project)
         workspaces = self.db.list_workspaces_for_project(project.id)
         linked = self.db.list_beamtimes_for_project(project.id)
-
         return ProjectInfo(
             project=project,
             workspaces=workspaces,
@@ -215,12 +200,10 @@ class ProjectManager:
         name: str | None = None,
         description: str | None = None,
     ) -> LaupyProject:
-        """Register a project even when it has no beamtime or workspace."""
         path = Path(path).resolve()
         existing = self.db.get_project_by_path(path)
         if existing is not None:
             return existing
-
         project = self.db.add_project(
             LaupyProject(
                 id=None,
@@ -238,19 +221,13 @@ class ProjectManager:
         path: Path,
         description: str | None = None,
     ) -> LaupyProjectWorkspace:
-        """Register one immediate child WD of a project.
-
-        This records an existing directory; it does not create one.
-        """
         project = self._project(project)
         path = Path(path).resolve()
-
         if path.parent != project.path.resolve() or not path.is_dir():
             raise ValueError(
                 "Workspace must be an existing immediate child directory "
                 "of the project"
             )
-
         existing = next(
             (
                 workspace
@@ -261,7 +238,6 @@ class ProjectManager:
         )
         if existing is not None:
             return existing
-
         workspace = self.db.add_workspace(
             LaupyProjectWorkspace(
                 id=None,
@@ -275,8 +251,7 @@ class ProjectManager:
         return workspace
 
     def list_workspaces(
-        self,
-        project: LaupyProject | int,
+        self, project: LaupyProject | int,
     ) -> list[LaupyProjectWorkspace]:
         project = self._project(project)
         return self.db.list_workspaces_for_project(project.id)
@@ -287,8 +262,8 @@ class ProjectManager:
         data: dict[str, Any] | None,
         metadata_text: str | None,
         existing: Beamtime | None,
+        readme_text: str | None = None,
     ) -> Beamtime:
-        """Preserve user description when refreshing external metadata."""
         data = data or {}
 
         def person(prefix: str) -> dict[str, str | None]:
@@ -311,30 +286,30 @@ class ProjectManager:
         return Beamtime(
             id=existing.id if existing else None,
             beamtime_id=root.name,
-            beamline=data.get("beamline"),
+            beamline=data.get("beamline") or (existing.beamline if existing else None),
             beamline_alias=data.get("beamlineAlias"),
-            beamline_setup=(
-                data.get("beamtimeSetup") or data.get("beamlineSetup")
-            ),
+            beamline_setup=data.get("beamtimeSetup") or data.get("beamlineSetup"),
             facility=data.get("facility"),
             proposal_id=data.get("proposalId"),
             proposal_type=data.get("proposalType"),
             event_start=data.get("eventStart"),
             event_end=data.get("eventEnd"),
             generated=data.get("generated"),
-            core_path=Path(core_path) if core_path else root,
+            # Prefer the actually scanned location. Metadata's corePath
+            # may refer to a different spelling or an obsolete location.
+            core_path=root,
             contact=data.get("contact"),
             retention_period=(
                 str(data["retentionPeriod"])
-                if data.get("retentionPeriod") is not None
-                else None
+                if data.get("retentionPeriod") is not None else None
             ),
             title=data.get("title"),
-            description=existing.description if existing else None,
+            description=(
+                readme_text if readme_text is not None
+                else existing.description if existing else None
+            ),
             unix_id=(
-                str(data["unixId"])
-                if data.get("unixId") is not None
-                else None
+                str(data["unixId"]) if data.get("unixId") is not None else None
             ),
             users_door_db=users.get("doorDb"),
             users_special=users.get("special"),
@@ -350,44 +325,70 @@ class ProjectManager:
         self,
         root: Path,
         progress_callback: ProgressCallback | None = None,
+        candidate: BeamtimeCandidate | None = None,
     ) -> BeamtimeDetail:
-        """Scan a beamtime independently of any Laupy project."""
-        root = Path(root).resolve()
+        """Update the database from one positively identified GPFS directory."""
+        root = Path(os.path.abspath(root))
         if not root.name.isdigit():
             raise ValueError(f"Expected numeric beamtime directory: {root}")
-        if not root.is_dir():
-            raise ValueError(f"Beamtime directory does not exist: {root}")
+        candidate = candidate or inspect_candidate(root)
+        if candidate is None or not candidate.accepted:
+            raise ValueError(f"Not a recognizable beamtime directory: {root}")
 
         if progress_callback is not None:
             progress_callback(f"Reading beamtime metadata from {root}")
-
-        data, text = self.beamtime_manager.load_metadata(root)
         existing = self.db.get_beamtime_by_key(root.name)
+        try:
+            data, text = self.beamtime_manager.load_metadata(root)
+        except (OSError, ValueError) as exc:
+            # A storage area is enough to recognize the directory. If
+            # metadata cannot be refreshed, retain previously stored data.
+            if existing is None:
+                data, text = None, None
+            else:
+                data, text = None, None
 
+        readme = candidate.readme_text if not candidate.scratch_cc_exists else None
         if data is None and existing is not None:
-            # Missing metadata must not erase an earlier successful scan.
             beamtime = existing
+            if readme is not None or beamtime.core_path != root:
+                beamtime.description = (
+                    readme if readme is not None else beamtime.description
+                )
+                beamtime.core_path = root
+                beamtime = self.db.add_beamtime(beamtime)
         else:
             beamtime = self.db.add_beamtime(
-                self._beamtime_from_metadata(root, data, text, existing)
+                self._beamtime_from_metadata(
+                    root, data, text, existing, readme_text=readme,
+                )
             )
 
         storage = self.db.get_beamtime_storage(beamtime.id)
         storage = self.beamtime_manager.inspect_storage(
-            root,
-            storage or BeamtimeStorage(beamtime_id=beamtime.id),
+            root, storage or BeamtimeStorage(beamtime_id=beamtime.id), candidate
         )
         self.db.upsert_beamtime_storage(storage)
         self.db.connection.commit()
-
         return BeamtimeDetail(beamtime=beamtime, storage=storage)
+
+    def mark_beamtime_offloaded(self, beamtime_id: int) -> None:
+        """An absent root changes only its GPFS status, never cached sizes."""
+        self.db.connection.execute(
+            """
+            UPDATE beamtime_storage
+            SET on_gpfs = 0, last_inspected = ?
+            WHERE beamtime_id = ? AND on_gpfs = 1
+            """,
+            (_now().isoformat(timespec="seconds"), beamtime_id),
+        )
+        self.db.connection.commit()
 
     def link_beamtime(
         self,
         project: LaupyProject | int,
         beamtime: Beamtime | int,
     ) -> None:
-        """Explicitly associate an independent project with a beamtime."""
         project = self._project(project)
         beamtime_id = beamtime if isinstance(beamtime, int) else beamtime.id
         if beamtime_id is None or self.db.get_beamtime(beamtime_id) is None:
@@ -399,14 +400,13 @@ class ProjectManager:
         project: LaupyProject | int,
         progress_callback: ProgressCallback | None = None,
     ) -> ProjectInfo:
-        """Discover a GPFS beamtime when possible; never remove manual links."""
         project = self._project(project)
         root = self.beamtime_manager.find_beamtime_root(project.path)
-
-        if root is not None and root.is_dir():
-            detail = self.scan_beamtime(root, progress_callback)
-            self.db.link_beamtime_project(detail.beamtime.id, project.id)
-
+        if root is not None:
+            candidate = inspect_candidate(root)
+            if candidate is not None and candidate.accepted:
+                detail = self.scan_beamtime(root, progress_callback, candidate)
+                self.db.link_beamtime_project(detail.beamtime.id, project.id)
         return self.get_project_info(project)
 
     def refresh_project_sizes(
@@ -414,23 +414,21 @@ class ProjectManager:
         project: LaupyProject | int,
         progress_callback: ProgressCallback | None = None,
     ) -> ProjectInfo:
-        """Count the project only, not its linked beamtimes' storage."""
         project = self._project(project)
-        size = self.beamtime_manager.dir_size_bytes(
-            project.path, progress_callback
-        )
-        now = _now().isoformat(timespec="seconds")
-        self.db.connection.execute(
-            """
-            UPDATE laupy_project
-            SET project_size_bytes = ?,
-                project_size_bytes_timestamp = ?,
-                last_inspected = ?
-            WHERE id = ?
-            """,
-            (size, now, now, project.id),
-        )
-        self.db.connection.commit()
+        size = self.beamtime_manager.dir_size_bytes(project.path, progress_callback)
+        if size is not None:
+            now = _now().isoformat(timespec="seconds")
+            self.db.connection.execute(
+                """
+                UPDATE laupy_project
+                SET project_size_bytes = ?,
+                    project_size_bytes_timestamp = ?,
+                    last_inspected = ?
+                WHERE id = ?
+                """,
+                (size, now, now, project.id),
+            )
+            self.db.connection.commit()
         return self.get_project_info(project)
 
     def refresh_workspace_size(
@@ -438,28 +436,24 @@ class ProjectManager:
         workspace: LaupyProjectWorkspace | int,
         progress_callback: ProgressCallback | None = None,
     ) -> LaupyProjectWorkspace:
-        workspace_id = (
-            workspace if isinstance(workspace, int) else workspace.id
-        )
+        workspace_id = workspace if isinstance(workspace, int) else workspace.id
         stored = self.db.get_workspace(workspace_id)
         if stored is None:
             raise ValueError(f"Workspace {workspace_id} does not exist")
-
-        size = self.beamtime_manager.dir_size_bytes(
-            stored.path, progress_callback
-        )
-        now = _now().isoformat(timespec="seconds")
-        self.db.connection.execute(
-            """
-            UPDATE laupy_project_workspace
-            SET workspace_size_bytes = ?,
-                workspace_size_bytes_timestamp = ?,
-                last_inspected = ?
-            WHERE id = ?
-            """,
-            (size, now, now, stored.id),
-        )
-        self.db.connection.commit()
+        size = self.beamtime_manager.dir_size_bytes(stored.path, progress_callback)
+        if size is not None:
+            now = _now().isoformat(timespec="seconds")
+            self.db.connection.execute(
+                """
+                UPDATE laupy_project_workspace
+                SET workspace_size_bytes = ?,
+                    workspace_size_bytes_timestamp = ?,
+                    last_inspected = ?
+                WHERE id = ?
+                """,
+                (size, now, now, stored.id),
+            )
+            self.db.connection.commit()
         return self.db.get_workspace(stored.id)
 
     def refresh_beamtime_sizes(
@@ -467,17 +461,15 @@ class ProjectManager:
         beamtime: Beamtime | int,
         progress_callback: ProgressCallback | None = None,
     ) -> BeamtimeStorage:
-        """Explicit operation: may be expensive on a large beamtime."""
         beamtime_id = beamtime if isinstance(beamtime, int) else beamtime.id
         stored = self.db.get_beamtime(beamtime_id)
         if stored is None or stored.core_path is None:
-            raise ValueError(
-                f"Beamtime {beamtime_id} has no known storage path"
-            )
-
-        root = stored.core_path
+            raise ValueError(f"Beamtime {beamtime_id} has no known storage path")
         storage = self.db.get_beamtime_storage(stored.id)
         storage = storage or BeamtimeStorage(beamtime_id=stored.id)
+
+        if storage.on_gpfs is False:
+            return storage
 
         for subdir, size_field, timestamp_field in (
             ("raw", "raw_size_bytes", "raw_size_bytes_timestamp"),
@@ -486,11 +478,14 @@ class ProjectManager:
             ("scratch_cc", "scratch_cc_size_bytes",
              "scratch_cc_size_bytes_timestamp"),
         ):
-            size = self.beamtime_manager.dir_size_bytes(
-                root / subdir, progress_callback
-            )
+            area = stored.core_path / subdir
+            if not area.is_dir():
+                continue  # Archive stub: preserve historical size.
+            size = self.beamtime_manager.dir_size_bytes(area, progress_callback)
+            if size is None:
+                continue
             setattr(storage, size_field, size)
-            setattr(storage, timestamp_field, _now() if size is not None else None)
+            setattr(storage, timestamp_field, _now())
 
         storage.last_inspected = _now()
         self.db.upsert_beamtime_storage(storage)
@@ -541,44 +536,31 @@ class ProjectManager:
         project = self._project(project)
         workspace_id = (
             workspace if isinstance(workspace, int)
-            else workspace.id if workspace is not None
-            else None
+            else workspace.id if workspace is not None else None
         )
-        # The schema's composite FK rejects a workspace from another project.
         self.db.add_history(
-            project_id=project.id,
-            workspace_id=workspace_id,
-            action="open",
+            project_id=project.id, workspace_id=workspace_id, action="open"
         )
 
     def record_project_close(self) -> None:
         self.db.add_history(
-            project_id=None,
-            workspace_id=None,
-            action="close",
+            project_id=None, workspace_id=None, action="close"
         )
 
     def current_project(self) -> LaupyProject | None:
-        """Unlike 'last non-null project', a close event clears this result."""
         events = self.db.list_history(limit=1)
         if not events or events[0].project_id is None:
             return None
         return self.db.get_project(events[0].project_id)
 
     def sync_workspaces_from_disk(
-        self,
-        project: LaupyProject | int,
+        self, project: LaupyProject | int,
     ) -> list[LaupyProjectWorkspace]:
-        """wd* directories currently on disk, registered for history/sizes.
-
-        Database rows whose directory has disappeared are not returned.
-        """
         project = self._project(project)
         try:
             paths = sorted(
                 (
-                    entry
-                    for entry in project.path.iterdir()
+                    entry for entry in project.path.iterdir()
                     if entry.is_dir() and entry.name.startswith("wd")
                 ),
                 key=lambda path: path.name.lower(),
