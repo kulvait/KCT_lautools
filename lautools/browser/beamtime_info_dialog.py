@@ -27,11 +27,13 @@ from PySide6.QtWidgets import (
 )
 
 from lautools.browser.project_config_dialog import (
+    _format_person,
     format_bytes,
     format_flag,
     format_time,
 )
 from lautools.browser.size_service_qt import SizeServiceBridge
+from lautools.browser.utils import open_terminal
 from lautools.size_service import (
     BEAMTIME_AREAS,
     SizeEvent,
@@ -72,7 +74,7 @@ class _SizeRow:
 
 
 class BeamtimeInfoDialog(QDialog):
-    """Edit one beamtime and manage its Laupy projects and cached sizes."""
+    """Editable beamtime information plus live storage and project sizes."""
 
     (
         PROJECT_NAME,
@@ -101,9 +103,9 @@ class BeamtimeInfoDialog(QDialog):
         self._active: dict[Path, str] = {}
 
         self.setWindowTitle(
-            f"Configure Beamtime {beamtime.beamtime_id}"
+            f"Beamtime Info - {beamtime.beamtime_id}"
         )
-        self.resize(980, 850)
+        self.resize(1040, 920)
         self.setWindowFlags(
             self.windowFlags()
             | Qt.CustomizeWindowHint
@@ -161,52 +163,146 @@ class BeamtimeInfoDialog(QDialog):
 
     def _create_beamtime_box(self) -> QGroupBox:
         box = QGroupBox("Beamtime")
-        form = QFormLayout(box)
+        layout = QVBoxLayout(box)
+
+        form = QFormLayout()
 
         self.label_edit = QLineEdit()
         self.label_edit.setToolTip(
-            "Name displayed in the Beamtime menu."
+            "Name shown in the Beamtime menu."
         )
         form.addRow("Label:", self.label_edit)
 
-        beamtime_id = QLabel(self.beamtime.beamtime_id)
-        beamtime_id.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        form.addRow("Beamtime ID:", beamtime_id)
-
-        beamline = QLabel(self.beamtime.beamline or "—")
-        form.addRow("Beamline:", beamline)
-
-        title = QLabel(self.beamtime.title or "—")
-        title.setWordWrap(True)
-        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        form.addRow("Title:", title)
-
-        proposal = QLabel(self.beamtime.proposal_id or "—")
-        form.addRow("Proposal:", proposal)
-
-        modality = QLabel(self.beamtime.beamline_setup or "—")
-        modality.setWordWrap(True)
-        modality.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        form.addRow("Modality:", modality)
-
-        path = QLabel(
-            str(self.beamtime.core_path)
-            if self.beamtime.core_path
-            else "—"
-        )
-        path.setWordWrap(True)
-        path.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        form.addRow("Core path:", path)
-
         self.description_edit = QPlainTextEdit()
-        self.description_edit.setMinimumHeight(110)
+        self.description_edit.setMaximumHeight(90)
         form.addRow("Description:", self.description_edit)
+
+        self.beamtime_id_label = QLabel("")
+        self.beamtime_id_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Beamtime ID:", self.beamtime_id_label)
+
+        self.title_label = QLabel("")
+        self.title_label.setWordWrap(True)
+        self.title_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Title:", self.title_label)
+
+        self.beamline_label = QLabel("")
+        self.beamline_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Beamline:", self.beamline_label)
+
+        core_path_widget = QWidget()
+        core_path_layout = QHBoxLayout(core_path_widget)
+        core_path_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.core_path_label = QLabel("")
+        self.core_path_label.setWordWrap(True)
+        self.core_path_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+
+        self.open_core_path_button = QPushButton("Open terminal")
+        self.open_core_path_button.clicked.connect(
+            self._open_core_path_terminal
+        )
+
+        core_path_layout.addWidget(self.core_path_label, 1)
+        core_path_layout.addWidget(self.open_core_path_button)
+        form.addRow("Core path:", core_path_widget)
+
+        self.proposal_id_label = QLabel("")
+        self.proposal_id_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Proposal ID:", self.proposal_id_label)
+
+        self.proposal_type_label = QLabel("")
+        self.proposal_type_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Proposal type:", self.proposal_type_label)
+
+        self.facility_label = QLabel("")
+        self.facility_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Facility:", self.facility_label)
+
+        self.setup_label = QLabel("")
+        self.setup_label.setWordWrap(True)
+        self.setup_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Setup:", self.setup_label)
+
+        self.contact_label = QLabel("")
+        self.contact_label.setWordWrap(True)
+        self.contact_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Contact:", self.contact_label)
+
+        self.retention_label = QLabel("")
+        self.retention_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Retention period:", self.retention_label)
+
+        self.unix_id_label = QLabel("")
+        self.unix_id_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Unix ID:", self.unix_id_label)
+
+        self.applicant_label = QLabel("")
+        self.applicant_label.setWordWrap(True)
+        self.applicant_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Applicant:", self.applicant_label)
+
+        self.leader_label = QLabel("")
+        self.leader_label.setWordWrap(True)
+        self.leader_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Leader:", self.leader_label)
+
+        self.pi_label = QLabel("")
+        self.pi_label.setWordWrap(True)
+        self.pi_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("PI:", self.pi_label)
+
+
+        self.event_start_label = QLabel("")
+        self.event_start_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Event start:", self.event_start_label)
+
+        self.event_end_label = QLabel("")
+        self.event_end_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        form.addRow("Event end:", self.event_end_label)
+
+        layout.addLayout(form)
+        
+        self.metadata_box = QGroupBox(f"Full JSON metadata")
+        metadata_layout = QVBoxLayout(self.metadata_box)
+
+        self.metadata_json_edit = QPlainTextEdit()
+        self.metadata_json_edit.setReadOnly(True)
+        self.metadata_json_edit.setMinimumHeight(180)
+        self.metadata_json_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+
+        metadata_layout.addWidget(self.metadata_json_edit)
+        layout.addWidget(self.metadata_box)
 
         return box
 
     def _create_storage_box(self) -> QGroupBox:
-        box = QGroupBox("Beamtime storage")
-        layout = QVBoxLayout(box)
+        self.storage_box = QGroupBox("Beamtime storage")
+        layout = QVBoxLayout(self.storage_box)
 
         grid = QGridLayout()
         for column, header in enumerate(
@@ -236,23 +332,34 @@ class BeamtimeInfoDialog(QDialog):
 
         form = QFormLayout()
 
+        self.shared_label = QLabel("")
         self.gpfs_label = QLabel("")
-        self.tape_label = QLabel("")
-        self.last_gpfs_label = QLabel("")
+        self.gpfs_extra_label = QLabel("")
+        self.gpfs_extra_label.setWordWrap(True)
         self.scratch_writable_label = QLabel("")
-        self.last_inspected_label = QLabel("")
+        self.raw_subdir_count_label = QLabel("")
+        self.raw_subdirs_edit = QPlainTextEdit()
+        self.raw_subdirs_edit.setReadOnly(True)
+        self.raw_subdirs_edit.setMaximumHeight(110)
+        self.raw_subdirs_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.storage_inspected_label = QLabel("")
 
+        form.addRow("shared exists:", self.shared_label)
         form.addRow("On GPFS:", self.gpfs_label)
-        form.addRow("On tape:", self.tape_label)
-        form.addRow("Last on GPFS:", self.last_gpfs_label)
+        form.addRow("Archive info:", self.gpfs_extra_label)
         form.addRow(
             "scratch_cc writable:",
             self.scratch_writable_label,
         )
-        form.addRow("Last inspected:", self.last_inspected_label)
+        form.addRow(
+            "raw subdirectories count:",
+            self.raw_subdir_count_label,
+        )
+        form.addRow("raw subdirectories:", self.raw_subdirs_edit)
+        form.addRow("Last inspected:", self.storage_inspected_label)
 
         layout.addLayout(form)
-        return box
+        return self.storage_box
 
     def _create_projects_box(self) -> QGroupBox:
         box = QGroupBox("Laupy projects in scratch_cc/kct_*")
@@ -266,7 +373,7 @@ class BeamtimeInfoDialog(QDialog):
         self.scan_projects_button.setToolTip(
             "Find immediate kct_* directories in scratch_cc, register and "
             "link them to this beamtime, then count scratch_cc once so all "
-            "project sizes are updated."
+            "project sizes are refreshed."
         )
         self.scan_projects_button.clicked.connect(
             self._scan_projects_and_sizes
@@ -362,6 +469,20 @@ class BeamtimeInfoDialog(QDialog):
             if part
         )
 
+    def _open_core_path_terminal(self) -> None:
+        if self.beamtime.core_path is None:
+            self.refresh_status_label.setText(
+                "Beamtime has no core path"
+            )
+            return
+
+        open_terminal(
+            self.beamtime.core_path,
+            on_error=lambda error: self.refresh_status_label.setText(
+                f"Error: {error}"
+            ),
+        )
+
     def _load_beamtime(self) -> None:
         refreshed = self.db.get_beamtime(self.beamtime.id)
         if refreshed is not None:
@@ -374,6 +495,38 @@ class BeamtimeInfoDialog(QDialog):
             self.beamtime.description or ""
         )
 
+        self.beamtime_id_label.setText(self.beamtime.beamtime_id or "—")
+        self.title_label.setText(self.beamtime.title or "—")
+        self.beamline_label.setText(self.beamtime.beamline or "—")
+        self.core_path_label.setText(
+            str(self.beamtime.core_path)
+            if self.beamtime.core_path
+            else "—"
+        )
+        self.proposal_id_label.setText(self.beamtime.proposal_id or "—")
+        self.proposal_type_label.setText(self.beamtime.proposal_type or "—")
+        self.facility_label.setText(self.beamtime.facility or "—")
+        self.setup_label.setText(self.beamtime.beamline_setup or "—")
+        self.contact_label.setText(self.beamtime.contact or "—")
+        self.retention_label.setText(self.beamtime.retention_period or "—")
+        self.unix_id_label.setText(self.beamtime.unix_id or "—")
+        self.applicant_label.setText(_format_person(self.beamtime, "applicant"))
+        self.leader_label.setText(_format_person(self.beamtime, "leader"))
+        self.pi_label.setText(_format_person(self.beamtime, "pi"))
+        if self.beamtime.generated is not None:
+            self.metadata_box.setTitle(f"Full JSON metadata, generated {self.beamtime.generated}")
+        self.event_start_label.setText(self.beamtime.event_start or "—")
+        self.event_end_label.setText(self.beamtime.event_end or "—")
+
+        self.metadata_json_edit.setPlainText(
+            self.beamtime.metadata_json or ""
+        )
+
+        self.open_core_path_button.setEnabled(
+            self.beamtime.core_path is not None
+            and self.beamtime.core_path.is_dir()
+        )
+
         if self.beamtime.core_path is None:
             self._area_paths = {}
         else:
@@ -382,6 +535,9 @@ class BeamtimeInfoDialog(QDialog):
                 area: core / area
                 for area in BEAMTIME_AREAS
             }
+            self.storage_box.setTitle(
+                f"Beamtime storage {core}"
+            )
 
     # ------------------------------------------------------------------
     # Project discovery
@@ -440,13 +596,12 @@ class BeamtimeInfoDialog(QDialog):
 
         if not projects:
             self.project_table.setRowCount(1)
-            item = QTableWidgetItem(
-                "(No linked kct_* projects; use Scan projects and sizes)"
-            )
             self.project_table.setItem(
                 0,
                 self.PROJECT_NAME,
-                item,
+                QTableWidgetItem(
+                    "(No linked kct_* projects; use Scan projects and sizes)"
+                ),
             )
 
     def _scan_projects_and_sizes(self) -> None:
@@ -471,8 +626,6 @@ class BeamtimeInfoDialog(QDialog):
             and scratch is not None
             and scratch.is_dir()
         ):
-            # One scratch_cc scan updates scratch_cc itself and every
-            # registered kct_* project below it.
             self.size_service.request(
                 scratch,
                 force=self.force_check.isChecked(),
@@ -536,25 +689,48 @@ class BeamtimeInfoDialog(QDialog):
             )
 
         if storage is None:
+            self.shared_label.setText("—")
             self.gpfs_label.setText("?")
-            self.tape_label.setText("?")
-            self.last_gpfs_label.setText("—")
+            self.gpfs_extra_label.setText("—")
             self.scratch_writable_label.setText("?")
-            self.last_inspected_label.setText("—")
+            self.raw_subdir_count_label.setText("—")
+            self.raw_subdirs_edit.setPlainText("")
+            self.storage_inspected_label.setText("—")
         else:
+            self.shared_label.setText(
+                format_flag(storage.shared_exists)
+            )
             self.gpfs_label.setText(
                 format_flag(storage.on_gpfs)
             )
-            self.tape_label.setText(
-                format_flag(storage.on_tape)
-            )
-            self.last_gpfs_label.setText(
-                format_time(storage.last_on_gpfs)
-            )
+
+            if storage.on_gpfs:
+                self.gpfs_extra_label.setText("—")
+            else:
+                extras = []
+                if storage.last_on_gpfs:
+                    extras.append(
+                        "Last on GPFS: "
+                        + format_time(storage.last_on_gpfs)
+                    )
+                extras.append(
+                    "On tape: " + format_flag(storage.on_tape)
+                )
+                self.gpfs_extra_label.setText("\n".join(extras))
+
             self.scratch_writable_label.setText(
                 format_flag(storage.scratch_cc_writable)
             )
-            self.last_inspected_label.setText(
+
+            count = storage.raw_subdir_count
+            self.raw_subdir_count_label.setText(
+                "?" if count is None else str(count)
+            )
+            self.raw_subdirs_edit.setPlainText(
+                "\n".join(storage.raw_subdir_samples or [])
+            )
+
+            self.storage_inspected_label.setText(
                 format_time(storage.last_inspected)
             )
 
@@ -665,6 +841,8 @@ class BeamtimeInfoDialog(QDialog):
             return f"Counting{via}…"
 
         if event.kind == SizeEventKind.FINISHED:
+            if event.errors:
+                return f"Updated; {event.errors} entries unreadable"
             return "Updated"
 
         if event.kind == SizeEventKind.SKIPPED:

@@ -33,6 +33,7 @@ from lautools.beamtime_scanner import (
     path_key,
 )
 from lautools.browser.utils import open_terminal
+from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
 
 log = logging.getLogger(__name__)
 

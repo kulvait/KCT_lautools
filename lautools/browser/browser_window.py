@@ -1519,9 +1519,19 @@ class BrowserWindow(QMainWindow):
         menu.clear()
         info_dialog_action = menu.addAction("Beamtime Info...")
         info_dialog_action.triggered.connect(lambda checked=False, bt=beamtime: self.open_beamtime_dialog(bt))
+        if beamtime.core_path is not None:
+            scratch = beamtime.core_path / "scratch_cc"
+            terminal = menu.addAction("Open Terminal in scratch_cc")
+            terminal.setEnabled(scratch.is_dir())
+            terminal.triggered.connect(
+                lambda checked=False, p=scratch: open_terminal(
+                    p,
+                    on_error=lambda error: self.status_label.setText(
+                        f"Error: {error}"
+                    ),
+                )
+            )
         menu.addSeparator()
-        
-
         entries = self._beamtime_project_entries(beamtime)
         if not entries:
             action = menu.addAction("(No projects or kct folders)")
@@ -1541,19 +1551,6 @@ class BrowserWindow(QMainWindow):
                         self.open_beamtime_project(bt, p)
                 )
 
-        if beamtime.core_path is not None:
-            scratch = beamtime.core_path / "scratch_cc"
-            menu.addSeparator()
-            terminal = menu.addAction("Open Terminal in scratch_cc")
-            terminal.setEnabled(scratch.is_dir())
-            terminal.triggered.connect(
-                lambda checked=False, p=scratch: open_terminal(
-                    p,
-                    on_error=lambda error: self.status_label.setText(
-                        f"Error: {error}"
-                    ),
-                )
-            )
 
     def open_beamtime_project(self, beamtime, path: Path) -> None:
         """Open a folder as a project and link it to its beamtime."""
