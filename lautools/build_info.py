@@ -15,12 +15,11 @@ def _git_commit():
         ).strip()
 
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
+        return None
+
+
+
+
 
 
 GIT_COMMIT = _git_commit()
-
-
-def about():
-    return f"lautools {__version__} (git: {GIT_COMMIT})"
-
