@@ -8,7 +8,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Callable
 
-from lautools.beamtime_scanner import BeamtimeCandidate, inspect_candidate
+from lautools.beamtime_scanner import (BeamtimeCandidate, inspect_candidate, parse_metadata_text)
 from lautools.db import (
     Beamtime,
     BeamtimeStorage,
@@ -79,22 +79,24 @@ class BeamtimeManager:
 
     def load_metadata(self, root: Path) -> tuple[dict[str, Any] | None, str | None]:
         """Accept both the usual filename and archive-stub metadata.json."""
-        for name in (f"beamtime-metadata-{root.name}.json", "metadata.json"):
+        for name in (f"beamtime-metadata-{root.name}.json", "metadata.json", f"beamtime-metadata-{root.name}.txt"):
             metadata_file = root / name
             try:
                 text = metadata_file.read_text(encoding="utf-8")
             except FileNotFoundError:
                 continue
-            data = json.loads(text)
-            if not isinstance(data, dict):
-                raise ValueError(f"Expected JSON object in {metadata_file}")
+            try:
+                data, json_text = parse_metadata_text(text)
+            except ValueError as exc:
+                raise ValueError(f"{exc}: {metadata_file}") from exc
             metadata_id = data.get("beamtimeId")
             if metadata_id is not None and str(metadata_id) != root.name:
                 raise ValueError(
                     f"Beamtime ID {metadata_id!r} does not match "
                     f"directory {root.name!r}: {metadata_file}"
                 )
-            return data, text
+            # Store only the JSON object so metadata_json in the database is always valid JSON.
+            return data, json_text
         return None, None
 
     def inspect_storage(

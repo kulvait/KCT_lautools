@@ -357,53 +357,30 @@ class BeamtimeListDialog(QDialog):
 
     @staticmethod
     def _modality(beamtime) -> str:
-        """Return beamline setup without Hereon ownership labels.
-
-        Examples:
-
-        "Hereon - Microtomography (EH4)"
-            -> "Microtomography (EH4)"
-
-        "Energy dispersive diffraction (LEDDI type diffractometer - Hereon)"
-            -> "Energy dispersive diffraction (LEDDI type diffractometer)"
-        """
+        """Return beamline setup without Hereon ownership labels."""
         text = (beamtime.beamline_setup or "").strip()
         if not text:
             return ""
-
-        # Remove "Hereon - " at the start.
+        # Remove "Hereon" together with an adjacent separator.
+        # Handles:
+        #   Hereon - Microtomography (EH4)
+        #   Microtomography (Hereon - EH4)
+        #   Microtomography (EH4 - Hereon)
+        #   Energy dispersive diffraction (LEDDI type diffractometer - Hereon)
         text = re.sub(
-            r"^\s*hereon\s*[-–—:]\s*",
+            r"\bhereon\b\s*[-–—:]?\s*",
             "",
             text,
             flags=re.IGNORECASE,
         )
-
-        # Remove suffixes such as " - Hereon", including before a closing
-        # parenthesis.
-        text = re.sub(
-            r"\s*[-–—]\s*hereon\b",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-        # Remove any remaining standalone occurrence.
-        text = re.sub(
-            r"\bhereon\b",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-        # Clean punctuation and whitespace left by removal.
+        # Clean up separators that may now be left behind.
+        text = re.sub(r"\(\s*[-–—:]\s*", "(", text)
+        text = re.sub(r"\s*[-–—:]\s*\)", ")", text)
+        # General whitespace/punctuation cleanup.
         text = re.sub(r"\(\s*\)", "", text)
-        text = re.sub(r"\(\s+", "(", text)
-        text = re.sub(r"\s+\)", ")", text)
-        text = re.sub(r"\s+([,;:])", r"\1", text)
-        text = re.sub(r"\s{2,}", " ", text)
-
+        text = re.sub(r"\s+", " ", text)
         return text.strip(" \t-–—:")
+
 
     # ------------------------------------------------------------------
     # Table from database

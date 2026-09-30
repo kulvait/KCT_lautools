@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import html
 from pathlib import Path
 import subprocess
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QActionGroup
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -39,9 +40,11 @@ from lautools.browser.utils import (
     open_terminal,
     open_thunar,
 )
+from lautools import about as lautools_about
 from lautools.browser.size_service_qt import SizeServiceBridge
 from lautools.size_service import SizeEventKind, SizeService
 
+PROJECT_REPOSITORY_URL = "https://github.com/kulvait/KCT_lautools"
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -176,6 +179,16 @@ class BrowserWindow(QMainWindow):
         self.workspace_menu.aboutToShow.connect(
             self._populate_workspace_menu
         )
+
+        # Help
+        help_menu = menu_bar.addMenu("&Help")
+        repository_action = help_menu.addAction("Project Repository")
+        repository_action.triggered.connect(self._open_project_repository)
+        license_action = help_menu.addAction("Show GNU GPLv3 License")
+        license_action.triggered.connect(self._show_license)
+        help_menu.addSeparator()
+        about_action = help_menu.addAction("About Lautools")
+        about_action.triggered.connect(self._show_about)
 
     def _open_project_terminal(self):
         if self.current_project is None:
@@ -1359,22 +1372,56 @@ class BrowserWindow(QMainWindow):
         ]
         return "_".join(part for part in parts if part)
 
+    def _current_beamtimes(self):
+        """Return beamtimes linked to the currently opened project."""
+        if self.current_project is None:
+            return []
+
+        try:
+            return self.db.list_beamtimes_for_project(
+                self.current_project.id
+            )
+        except Exception:
+            log.exception(
+                "Cannot load beamtimes for current project %s",
+                self.current_project.id,
+            )
+            return []
+
     def _menu_beamtimes(self):
-        """Beamtimes ticked as listed; all beamtimes if none are ticked."""
+        """Return listed beamtimes plus the currently opened beamtime.
+
+        If no beamtimes are explicitly listed, retain the existing fallback
+        of showing every beamtime in the database.
+        """
         try:
             beamtimes = self.db.list_listed_beamtimes()
+
             if not beamtimes:
                 beamtimes = self.db.list_beamtimes()
+
+            # The current project's beamtime must be visible even when it is
+            # not selected in lautools_app_listed_beamtime.
+            by_id = {
+                beamtime.id: beamtime
+                for beamtime in beamtimes
+            }
+
+            for beamtime in self._current_beamtimes():
+                by_id[beamtime.id] = beamtime
+
+            beamtimes = list(by_id.values())
+
         except Exception:
             log.exception("Cannot load beamtimes")
             return []
 
         return sorted(
             beamtimes,
-            key=lambda b: (
-                self._beamtime_beamline(b).casefold(),
-                self._beamtime_year(b),
-                b.beamtime_id,
+            key=lambda beamtime: (
+                self._beamtime_beamline(beamtime).casefold(),
+                self._beamtime_year(beamtime),
+                beamtime.beamtime_id,
             ),
         )
 
@@ -1382,23 +1429,58 @@ class BrowserWindow(QMainWindow):
         self.beamtime_menu.clear()
 
         beamtimes = self._menu_beamtimes()
-        if not beamtimes:
-            action = self.beamtime_menu.addAction("(No saved beamtimes)")
-            action.setEnabled(False)
-            return
+        current_beamtimes = self._current_beamtimes()
 
-        for beamtime in beamtimes:
-            submenu = self.beamtime_menu.addMenu(
-                self._beamtime_label(beamtime)
+        # Normally a project belongs to one beamtime. If several links exist,
+        # mark the first one according to the menu's stable beamtime ordering.
+        current_ids = {
+            beamtime.id
+            for beamtime in current_beamtimes
+        }
+        current_id = next(
+            (
+                beamtime.id
+                for beamtime in beamtimes
+                if beamtime.id in current_ids
+            ),
+            None,
+        )
+
+        if not beamtimes:
+            action = self.beamtime_menu.addAction(
+                "(No saved beamtimes)"
             )
-            tooltip = beamtime.title or str(beamtime.core_path or "")
-            submenu.menuAction().setToolTip(tooltip)
-            submenu.setToolTipsVisible(True)
-            # Fill lazily: scratch_cc is listed only when hovered.
-            submenu.aboutToShow.connect(
-                lambda menu=submenu, bt=beamtime:
-                    self._populate_beamtime_submenu(menu, bt)
-            )
+            action.setEnabled(False)
+        else:
+            # Exclusive checkable menu actions are rendered like the dot used
+            # by the Switch menu.
+            action_group = QActionGroup(self.beamtime_menu)
+            action_group.setExclusive(True)
+
+            for beamtime in beamtimes:
+                submenu = self.beamtime_menu.addMenu(
+                    self._beamtime_label(beamtime)
+                )
+
+                menu_action = submenu.menuAction()
+                menu_action.setCheckable(True)
+                menu_action.setChecked(
+                    beamtime.id == current_id
+                )
+                action_group.addAction(menu_action)
+
+                tooltip = (
+                    beamtime.title
+                    or str(beamtime.core_path or "")
+                )
+                menu_action.setToolTip(tooltip)
+                submenu.setToolTipsVisible(True)
+
+                # scratch_cc is inspected lazily only when this submenu opens.
+                submenu.aboutToShow.connect(
+                    lambda menu=submenu, bt=beamtime:
+                        self._populate_beamtime_submenu(menu, bt)
+                )
         self.beamtime_menu.addSeparator()
         self.find_beamtimes_action = self.beamtime_menu.addAction("List Beamtimes...")
         self.find_beamtimes_action.triggered.connect(self.find_beamtimes)
@@ -1518,4 +1600,102 @@ class BrowserWindow(QMainWindow):
         self.size_service.stop()
         super().closeEvent(event)
 
+    # ------------------------------------------------------------------
+    # Help
+    # ------------------------------------------------------------------
 
+    def _open_project_repository(self) -> None:
+        opened = QDesktopServices.openUrl(
+            QUrl(PROJECT_REPOSITORY_URL)
+        )
+
+        if not opened:
+            self.status_label.setText(
+                "Could not open the project repository"
+            )
+
+    @staticmethod
+    def _license_path() -> Path | None:
+        """Locate LICENSE when running from the source repository."""
+        module_path = Path(__file__).resolve()
+
+        # browser_window.py normally lives at:
+        # <repository>/lautools/browser/browser_window.py
+        candidates = [
+            module_path.parents[2] / "LICENSE",
+            Path.cwd() / "LICENSE",
+        ]
+
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError:
+                continue
+
+        return None
+
+    def _show_license(self) -> None:
+        license_path = self._license_path()
+
+        if license_path is None:
+            QMessageBox.warning(
+                self,
+                "License unavailable",
+                "The LICENSE file could not be located.\n\n"
+                "This project is licensed under GNU GPL v3.0.",
+            )
+            return
+
+        opened = open_files_mousepad(
+            [str(license_path)],
+            on_error=lambda error: self.status_label.setText(
+                f"Error: {error}"
+            ),
+        )
+
+        if not opened:
+            self.status_label.setText(
+                f"Could not open license file: {license_path}"
+            )
+
+    def _show_about(self) -> None:
+        version = html.escape(lautools_about())
+        repository = html.escape(PROJECT_REPOSITORY_URL)
+
+        message = QMessageBox(self)
+        message.setWindowTitle("About Lautools")
+        message.setIcon(QMessageBox.Information)
+        message.setTextFormat(Qt.RichText)
+        message.setTextInteractionFlags(
+            Qt.TextBrowserInteraction
+        )
+        message.setStandardButtons(QMessageBox.Ok)
+
+        message.setText(
+            f"<h3>{version}</h3>"
+            "<p>"
+            "Tools for tomography data preprocessing, reconstruction "
+            "workflows, and beamtime project management."
+            "</p>"
+            "<p>"
+            "The development of this package was supported by "
+            "<b>Hi ACTS Use Case Initiatives 2026</b> within the project "
+            "<i>Advanced reconstruction pipeline for tomography "
+            "experiments at PETRA III</i>."
+            "</p>"
+            "<p>"
+            "<b>Licensing</b><br>"
+            "GNU GPL v3.0."
+            "</p>"
+            "<p>"
+            "Copyright &copy; 2026 Vojtěch Kulvait"
+            "</p>"
+            f'<p><a href="{repository}">{repository}</a></p>'
+        )
+
+        # Enable the repository hyperlink inside the message box.
+        for label in message.findChildren(QLabel):
+            label.setOpenExternalLinks(True)
+
+        message.exec()

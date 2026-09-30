@@ -85,18 +85,44 @@ def path_key(path: Path) -> str:
     """Compare GPFS paths without resolving potentially slow automounts."""
     return os.path.normpath(os.path.abspath(os.fspath(path)))
 
+def parse_metadata_text(text: str) -> tuple[dict, str]:
+    """Parse beamtime metadata, tolerating text around the JSON object.
+
+    Older DOOR dumps wrap the object in explanatory lines, e.g.
+    "The following metadata are a dump from DOOR ..." before it and
+    "file created at: ..." after it. The object starting at the first
+    "{" is decoded and everything outside it is ignored.
+
+    Returns (data, json_text), where json_text is only the object itself.
+    Raises ValueError if no JSON object can be decoded.
+    """
+    try:
+        data = json.loads(text)
+    except ValueError:
+        start = text.find("{")
+        if start < 0:
+            raise ValueError("No JSON object found in metadata") from None
+        # raw_decode stops at the end of the first complete value, so
+        # trailing text is ignored and braces inside strings are handled.
+        data, end = json.JSONDecoder().raw_decode(text, start)
+        json_text = text[start:end]
+    else:
+        json_text = text
+
+    if not isinstance(data, dict):
+        raise ValueError("Metadata is not a JSON object")
+    return data, json_text
 
 def _metadata_readable(path: Path) -> bool:
-    for name in (f"beamtime-metadata-{path.name}.json", "metadata.json"):
+    for name in (f"beamtime-metadata-{path.name}.json", "metadata.json", f"beamtime-metadata-{path.name}.txt"):
         try:
-            with (path / name).open(encoding="utf-8") as handle:
-                data = json.load(handle)
+            text = (path / name).read_text(encoding="utf-8")
+            data, _ = parse_metadata_text(text)
         except (OSError, ValueError):
             continue
-        if isinstance(data, dict):
-            metadata_id = data.get("beamtimeId")
-            if metadata_id is None or str(metadata_id) == path.name:
-                return True
+        metadata_id = data.get("beamtime_id")
+        if metadata_id is None or str(metadata_id) == path.name:
+            return True
     return False
 
 
