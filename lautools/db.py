@@ -45,6 +45,7 @@ def _json_dumps(value: Any) -> str | None:
 class Beamtime:
     id: int | None
     beamtime_id: str
+    label: str | None = None
     beamline: str | None = None
     beamline_alias: str | None = None
     beamline_setup: str | None = None
@@ -191,7 +192,7 @@ class LaupyDB:
             CREATE TABLE IF NOT EXISTS beamtime (
                 id INTEGER PRIMARY KEY,
                 beamtime_id TEXT NOT NULL UNIQUE,
-
+                label TEXT,
                 beamline TEXT,
                 beamline_alias TEXT,
                 beamline_setup TEXT,
@@ -357,6 +358,7 @@ class LaupyDB:
         return Beamtime(
             id=row["id"],
             beamtime_id=row["beamtime_id"],
+            label=row["label"],
             beamline=row["beamline"],
             beamline_alias=row["beamline_alias"],
             beamline_setup=row["beamline_setup"],
@@ -478,6 +480,7 @@ class LaupyDB:
         now = _iso(_now())
         params = {
             "beamtime_id": beamtime.beamtime_id,
+            "label": beamtime.label,
             "beamline": beamtime.beamline,
             "beamline_alias": beamtime.beamline_alias,
             "beamline_setup": beamtime.beamline_setup,
@@ -518,7 +521,7 @@ class LaupyDB:
         self.connection.execute(
             """
             INSERT INTO beamtime (
-                beamtime_id, beamline, beamline_alias, beamline_setup, facility,
+                beamtime_id, label, beamline, beamline_alias, beamline_setup, facility,
                 proposal_id, proposal_type, event_start, event_end, generated,
                 core_path, applicant_username, applicant_lastname,
                 applicant_institute, applicant_email, applicant_user_id,
@@ -528,7 +531,7 @@ class LaupyDB:
                 description, unix_id, users_door_db, users_special,
                 users_unknown, metadata_json, created_at, updated_at
             ) VALUES (
-                :beamtime_id, :beamline, :beamline_alias, :beamline_setup, :facility,
+                :beamtime_id, :label, :beamline, :beamline_alias, :beamline_setup, :facility,
                 :proposal_id, :proposal_type, :event_start, :event_end, :generated,
                 :core_path, :applicant_username, :applicant_lastname,
                 :applicant_institute, :applicant_email, :applicant_user_id,
@@ -539,6 +542,8 @@ class LaupyDB:
                 :users_unknown, :metadata_json, :created_at, :updated_at
             )
             ON CONFLICT(beamtime_id) DO UPDATE SET
+                -- A rescan must not discard a label chosen by the user
+                label=COALESCE(excluded.label, beamtime.label),
                 beamline=excluded.beamline,
                 beamline_alias=excluded.beamline_alias,
                 beamline_setup=excluded.beamline_setup,
@@ -841,6 +846,14 @@ class LaupyDB:
                 pinned=excluded.pinned
             """,
             (beamtime_id, _iso(_now()), int(pinned)),
+        )
+        self.connection.commit()
+
+    def set_beamtime_label(self, beamtime_id: int, label: str | None) -> None:
+        """Store a user label; None or blank restores the default."""
+        self.connection.execute(
+            "UPDATE beamtime SET label = ?, updated_at = ? WHERE id = ?",
+            (label or None, _iso(_now()), beamtime_id),
         )
         self.connection.commit()
 

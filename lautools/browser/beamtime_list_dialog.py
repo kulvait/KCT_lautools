@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QInputDialog,
 )
 
 from lautools.beamtime_scanner import (
@@ -39,8 +40,9 @@ COLOR_NOT_ON_GPFS = QColor(255, 245, 157)  # yellow
 COLOR_WRITABLE = QColor(200, 230, 201)  # green
 COLOR_READ_ONLY = QColor(255, 205, 210)  # red
 
-PI_COLUMN_WIDTH = 150
-MODALITY_COLUMN_WIDTH = 150
+LABEL_COLUMN_WIDTH = 150
+PI_COLUMN_WIDTH = 120
+MODALITY_COLUMN_WIDTH = 120
 TITLE_COLUMN_WIDTH = 320
 DESCRIPTION_COLUMN_WIDTH = 250
 PATH_COLUMN_WIDTH = 340
@@ -82,13 +84,14 @@ class BeamtimeListDialog(QDialog):
         COL_PI,
         COL_MODALITY,
         COL_DESCRIPTION,
+        COL_RETENTION,
         COL_TAPE,
         COL_RAW,
         COL_PROCESSED,
         COL_SCRATCH,
         COL_META,
         COL_PATH,
-    ) = range(15)
+    ) = range(16)
 
     def __init__(self, project_manager, parent=None):
         super().__init__(parent)
@@ -187,7 +190,7 @@ class BeamtimeListDialog(QDialog):
         return row
 
     def _create_table(self) -> QTableWidget:
-        self.table = QTableWidget(0, 15)
+        self.table = QTableWidget(0, 16)
         self.table.setHorizontalHeaderLabels([
             "Listed",
             "Beamtime ID",
@@ -198,6 +201,7 @@ class BeamtimeListDialog(QDialog):
             "PI",
             "Modality",
             "Description",
+            "Retention",
             "Tape",
             "raw",
             "processed",
@@ -216,6 +220,7 @@ class BeamtimeListDialog(QDialog):
         self.table.customContextMenuRequested.connect(
             self._show_context_menu
         )
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
         self.table.itemChanged.connect(self._on_item_changed)
 
@@ -231,7 +236,7 @@ class BeamtimeListDialog(QDialog):
                 QHeaderView.Interactive,
             )
 
-        self.table.setColumnWidth(self.COL_SELECT, 65)
+        self.table.setColumnWidth(self.COL_SELECT, LABEL_COLUMN_WIDTH)
         self.table.setColumnWidth(self.COL_ID, 115)
         self.table.setColumnWidth(self.COL_BEAMLINE, 85)
         self.table.setColumnWidth(self.COL_YEAR, 65)
@@ -246,6 +251,7 @@ class BeamtimeListDialog(QDialog):
             self.COL_DESCRIPTION,
             DESCRIPTION_COLUMN_WIDTH,
         )
+        self.table.setColumnWidth(self.COL_RETENTION, 60)
         self.table.setColumnWidth(self.COL_TAPE, 60)
         self.table.setColumnWidth(self.COL_RAW, 60)
         self.table.setColumnWidth(self.COL_PROCESSED, 85)
@@ -331,16 +337,30 @@ class BeamtimeListDialog(QDialog):
         lastname = (beamtime.pi_lastname or "").strip()
         username = (beamtime.pi_username or "").strip()
         institute = (beamtime.pi_institute or "").strip()
-
         if lastname and username:
             result = f"{lastname} ({username})"
         else:
             result = lastname or username
-
         if not result and institute:
             result = institute
-
         return result
+
+    @classmethod
+    def _default_label(cls, beamtime) -> str:
+        parts = (
+            cls._beamline(beamtime),
+            cls._year(beamtime),
+            beamtime.beamtime_id,
+        )
+        return "_".join(part for part in parts if part)
+
+    @classmethod
+    def _label(cls, beamtime) -> str:
+        return beamtime.label or cls._default_label(beamtime)
+
+    @staticmethod
+    def _retention(beamtime) -> str:
+        return (beamtime.retention_period or "").strip()
 
     @staticmethod
     def _description_first_line(beamtime) -> str:
@@ -445,7 +465,7 @@ class BeamtimeListDialog(QDialog):
         storage,
         listed: bool,
     ) -> None:
-        listed_item = QTableWidgetItem()
+        listed_item = QTableWidgetItem(self._label(beamtime))
         listed_item.setFlags(
             Qt.ItemIsUserCheckable
             | Qt.ItemIsEnabled
@@ -455,6 +475,7 @@ class BeamtimeListDialog(QDialog):
             Qt.Checked if listed else Qt.Unchecked
         )
         listed_item.setData(Qt.UserRole, beamtime.id)
+        listed_item.setToolTip(f"Double-click or right-click to rename.\n Default label: {self._default_label(beamtime)}")
         self.table.setItem(row, self.COL_SELECT, listed_item)
 
         beamtime_id = beamtime.beamtime_id
@@ -524,6 +545,7 @@ class BeamtimeListDialog(QDialog):
             self.COL_DESCRIPTION,
             description_item,
         )
+        self.table.setItem(row, self.COL_RETENTION, self._cell(self._retention(beamtime), Qt.AlignCenter, ),)
 
         self.table.setItem(
             row,
@@ -634,6 +656,61 @@ class BeamtimeListDialog(QDialog):
                 if item is not None:
                     item.setBackground(brush)
                     item.setForeground(QBrush(Qt.black))
+
+    # ------------------------------------------------------------------
+    # Renaming labels
+    # ------------------------------------------------------------------
+
+    def _on_cell_double_clicked(self, row: int, column: int) -> None:
+        if column == self.COL_SELECT:
+            self._rename_label(row)
+
+    def _rename_label(self, row: int) -> None:
+        item = self.table.item(row, self.COL_SELECT)
+        if item is None:
+            return
+
+        beamtime_id = item.data(Qt.UserRole)
+        beamtime = self.db.get_beamtime(beamtime_id)
+        if beamtime is None:
+            return
+
+        text, accepted = QInputDialog.getText(
+            self,
+            "Rename beamtime",
+            f"Label for {beamtime.beamtime_id}\n"
+            f"(empty restores {self._default_label(beamtime)}):",
+            text=self._label(beamtime),
+        )
+        if not accepted:
+            return
+
+        text = text.strip()
+        try:
+            self.project_manager.set_beamtime_label(
+                beamtime_id,
+                text or None,
+            )
+        except Exception as exc:
+            log.warning("Cannot rename beamtime %s: %s", beamtime_id, exc)
+            self.status_label.setText(f"Cannot rename: {exc}")
+            return
+        self._load_from_db()
+    
+    def _reset_label_defult(self, row: int) -> None:
+        item = self.table.item(row, self.COL_SELECT)
+        if item is None:
+            return
+        beamtime_id = item.data(Qt.UserRole)
+        beamtime = self.db.get_beamtime(beamtime_id)
+        try:
+            self.project_manager.set_beamtime_label(beamtime_id, self._default_label(beamtime),
+            )
+        except Exception as exc:
+            log.warning("Cannot rename beamtime %s: %s", beamtime_id, exc)
+            self.status_label.setText(f"Cannot rename: {exc}")
+            return
+        self._load_from_db()
 
     # ------------------------------------------------------------------
     # Listing
@@ -888,18 +965,17 @@ class BeamtimeListDialog(QDialog):
         item = self.table.itemAt(position)
         if item is None:
             return
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename label")
+        rename_action.triggered.connect(lambda: self._rename_label(item.row()))
+        rename_to_default = menu.addAction("Restore default label")
+        rename_to_default.triggered.connect(lambda: self._reset_label_defult(item.row()))
         path_item = self.table.item(item.row(), self.COL_PATH)
         path = path_item.data(Qt.UserRole) if path_item else None
-        if not isinstance(path, Path):
-            return
-
-        menu = QMenu(self)
-        action = menu.addAction("Open Terminal Here")
-        action.triggered.connect(
-            lambda: open_terminal(
-                path, on_error=self.status_label.setText
-            )
-        )
+        if isinstance(path, Path):
+            menu.addSeparator()
+            action = menu.addAction("Open Terminal Here")
+            action.triggered.connect(lambda: open_terminal(path, on_error=self.status_label.setText))
         menu.exec(self.table.viewport().mapToGlobal(position))
 
     def done(self, result: int) -> None:

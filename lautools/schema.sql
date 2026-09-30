@@ -7,6 +7,7 @@
 CREATE TABLE IF NOT EXISTS beamtime (
     id INTEGER PRIMARY KEY,
     beamtime_id TEXT NOT NULL UNIQUE,
+    label TEXT,
 
     beamline TEXT,
     beamline_alias TEXT,

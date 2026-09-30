@@ -1364,13 +1364,10 @@ class BrowserWindow(QMainWindow):
         return beamtime.beamline or (parts[-4] if len(parts) >= 4 else "")
 
     def _beamtime_label(self, beamtime) -> str:
-        """beamline_year_beamtimeID, skipping unknown parts."""
-        parts = [
-            self._beamtime_beamline(beamtime),
-            self._beamtime_year(beamtime),
-            beamtime.beamtime_id,
-        ]
-        return "_".join(part for part in parts if part)
+        """Stored label, falling back to beamline_year_beamtimeID."""
+        if beamtime.label:
+            return beamtime.label
+        return "_".join(part for part in [self._beamtime_beamline(beamtime), self._beamtime_year(beamtime), beamtime.beamtime_id ] if part)
 
     def _current_beamtimes(self):
         """Return beamtimes linked to the currently opened project."""

@@ -23,6 +23,12 @@ ProgressCallback = Callable[[str], None]
 def _now() -> datetime:
     return datetime.now().replace(microsecond=0)
 
+def default_beamtime_label(root: Path, beamline: str | None) -> str:
+    """beamline_year_beamtimeID from the metadata and the GPFS path."""
+    parts = root.parts
+    beamline = beamline or (parts[-4] if len(parts) >= 4 else "")
+    year = parts[-3] if len(parts) >= 3 else ""
+    return "_".join(part for part in (beamline, year, root.name) if part)
 
 @dataclass
 class BeamtimeDetail:
@@ -177,7 +183,6 @@ class BeamtimeManager:
             return None
         return total
 
-
 class ProjectManager:
     def __init__(self, db: LaupyDB):
         self.db = db
@@ -270,6 +275,8 @@ class ProjectManager:
         project = self._project(project)
         return self.db.list_workspaces_for_project(project.id)
 
+
+
     def _beamtime_from_metadata(
         self,
         root: Path,
@@ -297,10 +304,12 @@ class ProjectManager:
             users = {}
 
         core_path = data.get("corePath")
+        beamline = data.get("beamline") or (existing.beamline if existing else None)
         return Beamtime(
             id=existing.id if existing else None,
             beamtime_id=root.name,
-            beamline=data.get("beamline") or (existing.beamline if existing else None),
+            beamline=beamline,
+            label=(existing.label if existing is not None and existing.label else default_beamtime_label(root, beamline)),
             beamline_alias=data.get("beamlineAlias"),
             beamline_setup=data.get("beamtimeSetup") or data.get("beamlineSetup"),
             facility=data.get("facility"),
@@ -600,3 +609,6 @@ class ProjectManager:
                 (beamtime_id,),
             )
             self.db.connection.commit()
+
+    def set_beamtime_label(self, beamtime_id: int, label: str | None) -> None:
+        self.db.set_beamtime_label(beamtime_id, label)
