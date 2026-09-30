@@ -1,4 +1,25 @@
+import subprocess
+from pathlib import Path
+
 from setuptools import setup, find_packages
+from setuptools.command.build_py import build_py
+
+class BuildPy(build_py):
+    def run(self):
+        super().run()
+
+        try:
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            commit = "unknown"
+
+        target = Path(self.build_lib) / "lautools" / "build_info.py"
+        target.write_text(f'GIT_COMMIT = "{commit}"\n')
+
 
 try:
     exec(open("lautools/version.py").read())
@@ -56,6 +77,7 @@ setup(
         ]
     },
     version=__version__,
+    cmdclass={"build_py": BuildPy},
     license="GPL3",
     description="Python package for tomographic data preprocessing and analysis",
 )
