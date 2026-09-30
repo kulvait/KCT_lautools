@@ -413,6 +413,121 @@ class ProjectManager:
             raise ValueError(f"Beamtime {beamtime_id} does not exist")
         self.db.link_beamtime_project(beamtime_id, project.id)
 
+    def update_beamtime_user_fields(
+        self,
+        beamtime: Beamtime | int,
+        label: str | None,
+        description: str | None,
+    ) -> Beamtime:
+        """Update fields owned by the user rather than metadata refresh."""
+        beamtime_id = (
+            beamtime
+            if isinstance(beamtime, int)
+            else beamtime.id
+        )
+        if beamtime_id is None:
+            raise ValueError("Beamtime has not been saved")
+
+        now = _now().isoformat(timespec="seconds")
+        self.db.connection.execute(
+            """
+            UPDATE beamtime
+            SET label = ?,
+                description = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                label.strip() if label else None,
+                description.strip() if description else None,
+                now,
+                beamtime_id,
+            ),
+        )
+        self.db.connection.commit()
+
+        updated = self.db.get_beamtime(beamtime_id)
+        if updated is None:
+            raise ValueError(
+                f"Beamtime {beamtime_id} no longer exists"
+            )
+        return updated
+
+    def sync_beamtime_projects_from_disk(
+        self,
+        beamtime: Beamtime | int,
+    ) -> list[LaupyProject]:
+        """Register immediate scratch_cc/kct_* folders as Laupy projects.
+
+        Existing links are preserved. Database projects whose folders have
+        disappeared remain stored, but are not returned by this scan.
+        """
+        beamtime_id = (
+            beamtime
+            if isinstance(beamtime, int)
+            else beamtime.id
+        )
+        stored = self.db.get_beamtime(beamtime_id)
+
+        if stored is None:
+            raise ValueError(
+                f"Beamtime {beamtime_id} does not exist"
+            )
+
+        if stored.core_path is None:
+            raise ValueError(
+                f"Beamtime {stored.beamtime_id} has no known core path"
+            )
+
+        scratch = stored.core_path / "scratch_cc"
+
+        if not scratch.is_dir():
+            return [
+                project
+                for project in self.db.list_projects_for_beamtime(
+                    stored.id
+                )
+                if project.path.is_dir()
+            ]
+
+        try:
+            paths = sorted(
+                (
+                    entry
+                    for entry in scratch.iterdir()
+                    if (
+                        entry.is_dir()
+                        and entry.name.casefold().startswith("kct_")
+                    )
+                ),
+                key=lambda path: path.name.casefold(),
+            )
+        except OSError:
+            paths = []
+
+        for path in paths:
+            try:
+                project = self.register_project(
+                    path,
+                    name=path.name,
+                )
+                self.link_beamtime(project, stored)
+            except (OSError, ValueError, sqlite3.Error):
+                continue
+
+        projects = self.db.list_projects_for_beamtime(
+            stored.id
+        )
+
+        return sorted(
+            (
+                project
+                for project in projects
+                if project.path.is_dir()
+            ),
+            key=lambda project: project.name.casefold(),
+        )
+
     def refresh_project_metadata(
         self,
         project: LaupyProject | int,

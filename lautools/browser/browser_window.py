@@ -29,6 +29,7 @@ from lautools.browser.create_wd_dialogs import (
     SampleSelectionDialog,
     script_command,
 )
+from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
 from lautools.browser.beamtime_list_dialog import BeamtimeListDialog
 from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
 from lautools.browser.project_config_dialog import ProjectConfigDialog
@@ -1516,6 +1517,10 @@ class BrowserWindow(QMainWindow):
 
     def _populate_beamtime_submenu(self, menu: QMenu, beamtime) -> None:
         menu.clear()
+        info_dialog_action = menu.addAction("Beamtime Info...")
+        info_dialog_action.triggered.connect(lambda checked=False, bt=beamtime: self.open_beamtime_dialog(bt))
+        menu.addSeparator()
+        
 
         entries = self._beamtime_project_entries(beamtime)
         if not entries:
@@ -1591,6 +1596,32 @@ class BrowserWindow(QMainWindow):
             return
 
         self._activate_project(project)
+
+    def open_beamtime_dialog(self, beamtime) -> None:
+        refreshed = self.db.get_beamtime(beamtime.id)
+        if refreshed is None:
+            self.status_label.setText(
+                "Beamtime no longer exists"
+            )
+            return
+
+        dialog = BeamtimeInfoDialog(
+            self.project_manager,
+            refreshed,
+            size_service=self.size_service,
+            parent=self,
+        )
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        refreshed = self.db.get_beamtime(beamtime.id)
+        label = (
+            refreshed.label
+            if refreshed is not None
+            else beamtime.beamtime_id
+        )
+        self.status_label.setText(f"Updated beamtime: {label}")
 
     def closeEvent(self, event):
         self.size_bridge.detach()
