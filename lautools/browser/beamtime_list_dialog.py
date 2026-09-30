@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor
@@ -34,9 +35,28 @@ from lautools.browser.utils import open_terminal
 
 log = logging.getLogger(__name__)
 
-COLOR_NOT_ON_GPFS = QColor(255, 245, 157)   # yellow
-COLOR_WRITABLE = QColor(200, 230, 201)     # green
-COLOR_READ_ONLY = QColor(255, 205, 210)    # red
+COLOR_NOT_ON_GPFS = QColor(255, 245, 157)  # yellow
+COLOR_WRITABLE = QColor(200, 230, 201)  # green
+COLOR_READ_ONLY = QColor(255, 205, 210)  # red
+
+PI_COLUMN_WIDTH = 150
+MODALITY_COLUMN_WIDTH = 150
+TITLE_COLUMN_WIDTH = 320
+DESCRIPTION_COLUMN_WIDTH = 250
+PATH_COLUMN_WIDTH = 340
+
+
+class _NumericItem(QTableWidgetItem):
+    """Table item that sorts its UserRole value numerically when possible."""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        left = self.data(Qt.UserRole)
+        right = other.data(Qt.UserRole)
+
+        try:
+            return int(left) < int(right)
+        except (TypeError, ValueError):
+            return self.text().casefold() < other.text().casefold()
 
 
 class _ScanBridge(QObject):
@@ -46,7 +66,7 @@ class _ScanBridge(QObject):
 
 
 class BeamtimeListDialog(QDialog):
-    """Database is the ground truth; a scan only updates it.
+    """Database-backed beamtime list updated by explicit GPFS scans.
 
     The tick in the first column mirrors lautools_app_listed_beamtime and is
     written immediately when toggled.
@@ -57,31 +77,42 @@ class BeamtimeListDialog(QDialog):
         COL_ID,
         COL_BEAMLINE,
         COL_YEAR,
-        COL_PI,
-        COL_TITLE,
-        COL_DESCRIPTION,
         COL_GPFS,
+        COL_TITLE,
+        COL_PI,
+        COL_MODALITY,
+        COL_DESCRIPTION,
         COL_TAPE,
         COL_RAW,
         COL_PROCESSED,
         COL_SCRATCH,
         COL_META,
         COL_PATH,
-    ) = range(14)
+    ) = range(15)
 
     def __init__(self, project_manager, parent=None):
         super().__init__(parent)
 
         self.project_manager = project_manager
         self.db = project_manager.db
+
         self._known_paths: dict[str, int] = {}
         self._known_ids: set[str] = set()
         self._added = 0
         self._updated = 0
         self._offloaded = 0
         self._failed = 0
-        self._populating = False
 
+        self._populating = False
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.CustomizeWindowHint
+            | Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
+        self.setSizeGripEnabled(True)
         self.setWindowTitle("Beamtimes")
         self.resize(1500, 700)
 
@@ -96,8 +127,8 @@ class BeamtimeListDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        # Rebuilding a sorted table on every FOUND event is expensive;
-        # coalesce refreshes during a scan.
+        # Avoid rebuilding and re-sorting the table for every individual
+        # FOUND event while a scan is running.
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(500)
@@ -105,6 +136,7 @@ class BeamtimeListDialog(QDialog):
 
         self._bridge = _ScanBridge()
         self._bridge.scanEvent.connect(self._on_scan_event)
+
         self._scanner = BeamtimeScanner(self._bridge.scanEvent.emit)
 
         self._load_from_db()
@@ -118,17 +150,29 @@ class BeamtimeListDialog(QDialog):
 
         self.base_edit = QLineEdit(str(DEFAULT_BASE))
 
-        self.gpfs_only_check = QCheckBox("Show only on GPFS")
+        self.gpfs_only_check = QCheckBox("Show on GPFS")
         self.gpfs_only_check.setToolTip(
             "Hide beamtimes whose data are not on GPFS, including archived "
-            "README-only references and vanished directories. Scanning always "
-            "covers all beamtimes."
+            "references and vanished directories. Scanning always examines "
+            "all available beamtime directories."
         )
-        self.gpfs_only_check.toggled.connect(lambda _: self._load_from_db())
+        self.gpfs_only_check.toggled.connect(
+            lambda _checked: self._load_from_db()
+        )
 
         self.scan_button = QPushButton("Scan")
+        self.scan_button.setToolTip(
+            "Crawl the GPFS base for beamtimes and update the database."
+        )
         self.scan_button.clicked.connect(self._start_scan)
 
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setToolTip(
+            "Re-inspect beamtimes already in the database without crawling "
+            "GPFS. New beamtimes are not discovered."
+        )
+        self.refresh_button.clicked.connect(self._start_refresh)
+ 
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel_scan)
@@ -137,21 +181,23 @@ class BeamtimeListDialog(QDialog):
         row.addWidget(self.base_edit, 1)
         row.addWidget(self.gpfs_only_check)
         row.addWidget(self.scan_button)
+        row.addWidget(self.refresh_button)
         row.addWidget(self.cancel_button)
 
         return row
 
     def _create_table(self) -> QTableWidget:
-        self.table = QTableWidget(0, 14)
+        self.table = QTableWidget(0, 15)
         self.table.setHorizontalHeaderLabels([
             "Listed",
-            "Beamtime",
+            "Beamtime ID",
             "Beamline",
             "Year",
-            "PI",
-            "Title",
-            "Description",
             "GPFS",
+            "Title",
+            "PI",
+            "Modality",
+            "Description",
             "Tape",
             "raw",
             "processed",
@@ -162,18 +208,58 @@ class BeamtimeListDialog(QDialog):
 
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.table.verticalHeader().setVisible(False)
 
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(
             self._show_context_menu
         )
+
         self.table.itemChanged.connect(self._on_item_changed)
 
         header = self.table.horizontalHeader()
-        for column in range(self.COL_PATH):
-            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(self.COL_PATH, QHeaderView.Stretch)
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setStretchLastSection(False)
+
+        # All columns remain manually adjustable.
+        for column in range(self.table.columnCount()):
+            header.setSectionResizeMode(
+                column,
+                QHeaderView.Interactive,
+            )
+
+        self.table.setColumnWidth(self.COL_SELECT, 65)
+        self.table.setColumnWidth(self.COL_ID, 115)
+        self.table.setColumnWidth(self.COL_BEAMLINE, 85)
+        self.table.setColumnWidth(self.COL_YEAR, 65)
+        self.table.setColumnWidth(self.COL_GPFS, 65)
+        self.table.setColumnWidth(self.COL_TITLE, TITLE_COLUMN_WIDTH)
+        self.table.setColumnWidth(self.COL_PI, PI_COLUMN_WIDTH)
+        self.table.setColumnWidth(
+            self.COL_MODALITY,
+            MODALITY_COLUMN_WIDTH,
+        )
+        self.table.setColumnWidth(
+            self.COL_DESCRIPTION,
+            DESCRIPTION_COLUMN_WIDTH,
+        )
+        self.table.setColumnWidth(self.COL_TAPE, 60)
+        self.table.setColumnWidth(self.COL_RAW, 60)
+        self.table.setColumnWidth(self.COL_PROCESSED, 85)
+        self.table.setColumnWidth(self.COL_SCRATCH, 100)
+        self.table.setColumnWidth(self.COL_META, 80)
+        self.table.setColumnWidth(self.COL_PATH, PATH_COLUMN_WIDTH)
+
+        # The initial table order is provided by _load_from_db. Once enabled,
+        # the user can sort by clicking any column header.
+        self.table.setSortingEnabled(True)
+        header.setSortIndicator(
+            self.COL_BEAMLINE,
+            Qt.AscendingOrder,
+        )
 
         return self.table
 
@@ -181,10 +267,14 @@ class BeamtimeListDialog(QDialog):
         row = QHBoxLayout()
 
         select_all = QPushButton("List all shown")
-        select_all.clicked.connect(lambda: self._set_all_listed(True))
+        select_all.clicked.connect(
+            lambda: self._set_all_listed(True)
+        )
 
         select_none = QPushButton("Unlist all shown")
-        select_none.clicked.connect(lambda: self._set_all_listed(False))
+        select_none.clicked.connect(
+            lambda: self._set_all_listed(False)
+        )
 
         select_writable = QPushButton("List only writable")
         select_writable.clicked.connect(self._list_writable)
@@ -207,20 +297,22 @@ class BeamtimeListDialog(QDialog):
         return self.progress
 
     # ------------------------------------------------------------------
-    # Table helpers
+    # Display helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _cell(text: str) -> QTableWidgetItem:
+    def _cell(
+        text: str,
+        alignment=Qt.AlignVCenter | Qt.AlignLeft,
+    ) -> QTableWidgetItem:
         item = QTableWidgetItem(text)
-        item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        item.setTextAlignment(alignment)
         return item
 
     @classmethod
     def _flag(cls, value: bool | None) -> QTableWidgetItem:
-        if value is None:
-            return cls._cell("?")
-        return cls._cell("yes" if value else "no")
+        text = "?" if value is None else "yes" if value else "no"
+        return cls._cell(text, Qt.AlignCenter)
 
     @staticmethod
     def _year(beamtime) -> str:
@@ -236,33 +328,82 @@ class BeamtimeListDialog(QDialog):
 
     @staticmethod
     def _pi(beamtime) -> str:
-        """Return a compact PI label for the table."""
         lastname = (beamtime.pi_lastname or "").strip()
         username = (beamtime.pi_username or "").strip()
         institute = (beamtime.pi_institute or "").strip()
 
         if lastname and username:
-            value = f"{lastname} ({username})"
+            result = f"{lastname} ({username})"
         else:
-            value = lastname or username
+            result = lastname or username
 
-        if institute:
-            if value:
-                value += f" — {institute}"
-            else:
-                value = institute
+        if not result and institute:
+            result = institute
 
-        return value
+        return result
 
     @staticmethod
     def _description_first_line(beamtime) -> str:
-        description = beamtime.description or ""
-        lines = description.splitlines()
-        return lines[0].strip() if lines else ""
+        description = (beamtime.description or "").strip()
+        if not description:
+            return ""
+
+        for line in description.splitlines():
+            line = line.strip()
+            if line:
+                return line
+
+        return ""
 
     @staticmethod
-    def _description_tooltip(beamtime) -> str:
-        return (beamtime.description or "").strip()
+    def _modality(beamtime) -> str:
+        """Return beamline setup without Hereon ownership labels.
+
+        Examples:
+
+        "Hereon - Microtomography (EH4)"
+            -> "Microtomography (EH4)"
+
+        "Energy dispersive diffraction (LEDDI type diffractometer - Hereon)"
+            -> "Energy dispersive diffraction (LEDDI type diffractometer)"
+        """
+        text = (beamtime.beamline_setup or "").strip()
+        if not text:
+            return ""
+
+        # Remove "Hereon - " at the start.
+        text = re.sub(
+            r"^\s*hereon\s*[-–—:]\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # Remove suffixes such as " - Hereon", including before a closing
+        # parenthesis.
+        text = re.sub(
+            r"\s*[-–—]\s*hereon\b",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # Remove any remaining standalone occurrence.
+        text = re.sub(
+            r"\bhereon\b",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # Clean punctuation and whitespace left by removal.
+        text = re.sub(r"\(\s*\)", "", text)
+        text = re.sub(r"\(\s+", "(", text)
+        text = re.sub(r"\s+\)", ")", text)
+        text = re.sub(r"\s+([,;:])", r"\1", text)
+        text = re.sub(r"\s{2,}", " ", text)
+
+        return text.strip(" \t-–—:")
 
     # ------------------------------------------------------------------
     # Table from database
@@ -282,17 +423,22 @@ class BeamtimeListDialog(QDialog):
 
             entries.append((beamtime, storage))
 
-        # Sort primarily by beamline and year, with beamtime ID as a stable
-        # third key.
+        # Default order before the user selects a header sort.
         entries.sort(
             key=lambda entry: (
-                self._beamline(entry[0]).lower(),
+                self._beamline(entry[0]).casefold(),
                 self._year(entry[0]),
                 entry[0].beamtime_id,
             )
         )
 
+        header = self.table.horizontalHeader()
+        sort_column = header.sortIndicatorSection()
+        sort_order = header.sortIndicatorOrder()
+
         self._populating = True
+        self.table.setSortingEnabled(False)
+
         try:
             self.table.setRowCount(0)
             self.table.setRowCount(len(entries))
@@ -305,6 +451,8 @@ class BeamtimeListDialog(QDialog):
                     beamtime.id in listed,
                 )
         finally:
+            self.table.setSortingEnabled(True)
+            self.table.sortItems(sort_column, sort_order)
             self._populating = False
 
         if not self._scanner.running:
@@ -320,73 +468,117 @@ class BeamtimeListDialog(QDialog):
         storage,
         listed: bool,
     ) -> None:
-        select = QTableWidgetItem()
-        select.setFlags(
+        listed_item = QTableWidgetItem()
+        listed_item.setFlags(
             Qt.ItemIsUserCheckable
             | Qt.ItemIsEnabled
             | Qt.ItemIsSelectable
         )
-        select.setCheckState(Qt.Checked if listed else Qt.Unchecked)
-        select.setData(Qt.UserRole, beamtime.id)
-        self.table.setItem(row, self.COL_SELECT, select)
+        listed_item.setCheckState(
+            Qt.Checked if listed else Qt.Unchecked
+        )
+        listed_item.setData(Qt.UserRole, beamtime.id)
+        self.table.setItem(row, self.COL_SELECT, listed_item)
+
+        beamtime_id = beamtime.beamtime_id
+        id_item = _NumericItem(beamtime_id)
+        id_item.setData(
+            Qt.UserRole,
+            int(beamtime_id) if beamtime_id.isdigit() else beamtime_id,
+        )
+        id_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.COL_ID, id_item)
 
         self.table.setItem(
             row,
-            self.COL_ID,
-            self._cell(beamtime.beamtime_id),
-        )
-        self.table.setItem(
-            row,
             self.COL_BEAMLINE,
-            self._cell(self._beamline(beamtime)),
+            self._cell(
+                self._beamline(beamtime),
+                Qt.AlignCenter,
+            ),
         )
-        self.table.setItem(
-            row,
-            self.COL_YEAR,
-            self._cell(self._year(beamtime)),
+
+        year = self._year(beamtime)
+        year_item = _NumericItem(year)
+        year_item.setData(
+            Qt.UserRole,
+            int(year) if year.isdigit() else year,
         )
-        self.table.setItem(
-            row,
-            self.COL_PI,
-            self._cell(self._pi(beamtime)),
-        )
-        self.table.setItem(
-            row,
-            self.COL_TITLE,
-            self._cell(beamtime.title or ""),
-        )
-        self.table.setItem(
-            row,
-            self.COL_DESCRIPTION,
-            self._cell(self._description_first_line(beamtime)),
-        )
+        year_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.COL_YEAR, year_item)
 
         self.table.setItem(
             row,
             self.COL_GPFS,
-            self._flag(storage.on_gpfs if storage else None),
+            self._flag(
+                storage.on_gpfs if storage is not None else None
+            ),
         )
+
+        title = (beamtime.title or "").strip()
+        title_item = self._cell(title)
+        if title:
+            title_item.setToolTip(title)
+        self.table.setItem(row, self.COL_TITLE, title_item)
+
+        pi = self._pi(beamtime)
+        pi_item = self._cell(pi)
+        if pi:
+            pi_item.setToolTip(pi)
+        self.table.setItem(row, self.COL_PI, pi_item)
+
+        original_modality = (beamtime.beamline_setup or "").strip()
+        modality = self._modality(beamtime)
+        modality_item = self._cell(modality)
+        if original_modality:
+            modality_item.setToolTip(original_modality)
+        self.table.setItem(
+            row,
+            self.COL_MODALITY,
+            modality_item,
+        )
+
+        description = self._description_first_line(beamtime)
+        description_item = self._cell(description)
+        if beamtime.description:
+            description_item.setToolTip(beamtime.description)
+        self.table.setItem(
+            row,
+            self.COL_DESCRIPTION,
+            description_item,
+        )
+
         self.table.setItem(
             row,
             self.COL_TAPE,
-            self._flag(storage.on_tape if storage else None),
+            self._flag(
+                storage.on_tape if storage is not None else None
+            ),
         )
         self.table.setItem(
             row,
             self.COL_RAW,
-            self._flag(storage.raw_exists if storage else None),
+            self._flag(
+                storage.raw_exists if storage is not None else None
+            ),
         )
         self.table.setItem(
             row,
             self.COL_PROCESSED,
             self._flag(
-                storage.processed_exists if storage else None
+                storage.processed_exists
+                if storage is not None
+                else None
             ),
         )
 
         scratch = "?"
-        if storage is not None and storage.scratch_cc_exists is not None:
+        if (
+            storage is not None
+            and storage.scratch_cc_exists is not None
+        ):
             scratch = "no"
+
             if storage.scratch_cc_exists:
                 scratch = (
                     "writable"
@@ -397,8 +589,9 @@ class BeamtimeListDialog(QDialog):
         self.table.setItem(
             row,
             self.COL_SCRATCH,
-            self._cell(scratch),
+            self._cell(scratch, Qt.AlignCenter),
         )
+
         self.table.setItem(
             row,
             self.COL_META,
@@ -406,41 +599,33 @@ class BeamtimeListDialog(QDialog):
         )
 
         path = beamtime.core_path
-        path_item = self._cell(str(path) if path else "")
-        path_item.setToolTip(str(path) if path else "")
+        path_text = str(path) if path else ""
+        path_item = self._cell(path_text)
+        path_item.setToolTip(path_text)
+
         if path is not None:
             path_item.setData(Qt.UserRole, path)
-        self.table.setItem(row, self.COL_PATH, path_item)
 
-        # Preserve the complete description as a tooltip while showing only
-        # its first line in the table.
-        description_tooltip = self._description_tooltip(beamtime)
-        if description_tooltip:
-            self.table.item(
-                row, self.COL_DESCRIPTION
-            ).setToolTip(description_tooltip)
+        self.table.setItem(
+            row,
+            self.COL_PATH,
+            path_item,
+        )
 
-        if beamtime.title:
-            self.table.item(row, self.COL_TITLE).setToolTip(
-                beamtime.title
+        tooltip = (beamtime.description or "").strip()
+
+        if (
+            storage is not None
+            and storage.on_gpfs is False
+            and storage.last_on_gpfs
+        ):
+            last_seen = storage.last_on_gpfs.isoformat(
+                sep=" ",
+                timespec="seconds",
             )
-
-        if self._pi(beamtime):
-            self.table.item(row, self.COL_PI).setToolTip(
-                self._pi(beamtime)
-            )
-
-        tooltip = description_tooltip
-        if storage is not None and storage.on_gpfs is False:
-            if storage.last_on_gpfs:
-                last_seen = storage.last_on_gpfs.isoformat(
-                    sep=" ",
-                    timespec="seconds",
-                )
-                tooltip = (
-                    f"Last on GPFS: {last_seen}\n\n"
-                    f"{tooltip}"
-                ).strip()
+            tooltip = (
+                f"Last on GPFS: {last_seen}\n\n{tooltip}"
+            ).strip()
 
         if tooltip:
             for column in (
@@ -448,25 +633,27 @@ class BeamtimeListDialog(QDialog):
                 self.COL_GPFS,
                 self.COL_TAPE,
             ):
-                self.table.item(row, column).setToolTip(tooltip)
+                item = self.table.item(row, column)
+                if item is not None:
+                    item.setToolTip(tooltip)
 
-        # Row colors:
-        # - yellow: not on GPFS
-        # - green: on GPFS and writable scratch_cc
-        # - red: on GPFS and non-writable or missing scratch_cc
         color = None
+
         if storage is not None and storage.on_gpfs is False:
             color = COLOR_NOT_ON_GPFS
         elif storage is not None and storage.on_gpfs:
-            if storage.scratch_cc_writable:
-                color = COLOR_WRITABLE
-            else:
-                color = COLOR_READ_ONLY
+            color = (
+                COLOR_WRITABLE
+                if storage.scratch_cc_writable
+                else COLOR_READ_ONLY
+            )
 
         if color is not None:
             brush = QBrush(color)
+
             for column in range(self.table.columnCount()):
                 item = self.table.item(row, column)
+
                 if item is not None:
                     item.setBackground(brush)
                     item.setForeground(QBrush(Qt.black))
@@ -475,7 +662,10 @@ class BeamtimeListDialog(QDialog):
     # Listing
     # ------------------------------------------------------------------
 
-    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+    def _on_item_changed(
+        self,
+        item: QTableWidgetItem,
+    ) -> None:
         if self._populating or item.column() != self.COL_SELECT:
             return
 
@@ -506,17 +696,30 @@ class BeamtimeListDialog(QDialog):
             if item is None:
                 continue
 
-            state = Qt.Checked if predicate(row) else Qt.Unchecked
+            state = (
+                Qt.Checked
+                if predicate(row)
+                else Qt.Unchecked
+            )
+
             if item.checkState() != state:
                 item.setCheckState(state)
 
     def _set_all_listed(self, listed: bool) -> None:
-        self._set_listed_rows(lambda _row: listed)
+        self._set_listed_rows(
+            lambda _row: listed
+        )
 
     def _list_writable(self) -> None:
         def writable(row: int) -> bool:
-            scratch = self.table.item(row, self.COL_SCRATCH)
-            gpfs = self.table.item(row, self.COL_GPFS)
+            scratch = self.table.item(
+                row,
+                self.COL_SCRATCH,
+            )
+            gpfs = self.table.item(
+                row,
+                self.COL_GPFS,
+            )
 
             return (
                 scratch is not None
@@ -530,51 +733,46 @@ class BeamtimeListDialog(QDialog):
     # ------------------------------------------------------------------
     # Scanning
     # ------------------------------------------------------------------
-
-    def _start_scan(self) -> None:
-        base = Path(
-            self.base_edit.text().strip() or str(DEFAULT_BASE)
-        )
-
-        if self._scanner.running:
-            self.status_label.setText(
-                "Previous scan is still stopping"
-            )
-            return
-
-        if not base.is_dir():
-            self.status_label.setText(f"Not a directory: {base}")
-            return
-
+    def _collect_known(self) -> list:
+        """Snapshot database state before a scan or refresh."""
+        beamtimes = self.db.list_beamtimes()
         self._known_paths = {}
-        for beamtime in self.db.list_beamtimes():
+        for beamtime in beamtimes:
             storage = self.db.get_beamtime_storage(beamtime.id)
-
             if (
                 beamtime.core_path is not None
                 and storage is not None
                 and storage.on_gpfs is True
             ):
-                self._known_paths[
-                    path_key(beamtime.core_path)
-                ] = beamtime.id
+                self._known_paths[path_key(beamtime.core_path)] = beamtime.id
+        self._known_ids = {beamtime.beamtime_id for beamtime in beamtimes}
+        self._added = self._updated = self._offloaded = self._failed = 0
+        self._skipped = 0
+        return beamtimes
 
-        self._known_ids = {
-            beamtime.beamtime_id
-            for beamtime in self.db.list_beamtimes()
-        }
+    def _set_busy(self, busy: bool) -> None:
+        self.scan_button.setEnabled(not busy)
+        self.refresh_button.setEnabled(not busy)
+        self.cancel_button.setEnabled(busy)
+        self.progress.setVisible(busy)
 
-        self._added = 0
-        self._updated = 0
-        self._offloaded = 0
-        self._failed = 0
+    def _start_scan(self) -> None:
+        base = Path(self.base_edit.text().strip() or str(DEFAULT_BASE))
 
-        self.scan_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-        self.progress.setVisible(True)
+        if self._scanner.running:
+            self.status_label.setText("Previous scan is still stopping")
+            return
+
+        if not base.is_dir():
+            self.status_label.setText(
+                f"Not a directory: {base}"
+            )
+            return
+        self._collect_known()
+        self._operation = "Scan"
+        self._set_busy(True)
         self.status_label.setText(f"Scanning {base}...")
 
-        # Always scan all candidates. The checkbox only filters the table.
         self._scanner.start(
             base=base,
             known_on_gpfs=[
@@ -583,19 +781,43 @@ class BeamtimeListDialog(QDialog):
             ],
         )
 
-    def _cancel_scan(self) -> None:
-        self._scanner.cancel()
-        self.status_label.setText("Cancelling scan...")
-
-    def _on_scan_event(self, event: ScanEvent) -> None:
-        if event.kind == ScanEventKind.PROGRESS:
-            if event.scanned % 25 == 0:
-                self.status_label.setText(
-                    f"Checked {event.scanned} directories, "
-                    f"found {event.found}"
-                )
+    def _start_refresh(self) -> None:
+        if self._scanner.running:
+            self.status_label.setText("Previous operation is still stopping")
             return
 
+        beamtimes = self._collect_known()
+        paths = [
+            beamtime.core_path
+            for beamtime in beamtimes
+            if beamtime.core_path is not None
+        ]
+        self._skipped = len(beamtimes) - len(paths)  # no stored path
+        if not paths:
+            self.status_label.setText("No beamtimes with a known path to refresh")
+            return
+
+        self._operation = "Refresh"
+        self._set_busy(True)
+        self.status_label.setText(f"Refreshing {len(paths)} beamtimes...")
+        self._scanner.start_refresh(paths, known_on_gpfs=[Path(path) for path in self._known_paths],)
+
+    def _cancel_scan(self) -> None:
+        self._scanner.cancel()
+        self.status_label.setText(f"Cancelling {self._operation.lower()}...")
+
+    def _on_scan_event(
+        self,
+        event: ScanEvent,
+    ) -> None:
+        if event.kind == ScanEventKind.PROGRESS:
+            if event.scanned % 25 == 0:
+               verb = "Checked" if self._operation == "Scan" else "Refreshed"
+               self.status_label.setText(
+                   f"{verb} {event.scanned} directories, "
+                   f"found {event.found}"
+               )
+            return
         if (
             event.kind == ScanEventKind.FOUND
             and event.candidate is not None
@@ -603,7 +825,6 @@ class BeamtimeListDialog(QDialog):
             self._store_candidate(event.candidate)
             self._refresh_timer.start()
             return
-
         if (
             event.kind == ScanEventKind.OFFLOADED
             and event.current is not None
@@ -618,37 +839,41 @@ class BeamtimeListDialog(QDialog):
                 self._offloaded += 1
                 self._refresh_timer.start()
             return
-
         if event.kind in (
             ScanEventKind.FINISHED,
             ScanEventKind.CANCELLED,
             ScanEventKind.FAILED,
         ):
             self._refresh_timer.stop()
-            self.progress.setVisible(False)
-            self.scan_button.setEnabled(True)
-            self.cancel_button.setEnabled(False)
+            self._set_busy(False)
             self._load_from_db()
-
+            if self._operation == "Refresh":
+                # Rows not recognized and not demonstrably gone were left as-is.
+                self._skipped += max(
+                    0, event.scanned - event.found - self._offloaded
+                )
             summary = (
                 f"{self._added} new, "
                 f"{self._updated} updated, "
                 f"{self._offloaded} no longer on GPFS, "
                 f"{self._failed} failed"
             )
+            if self._operation == "Refresh":
+                summary += f", {self._skipped} skipped (unreadable or unknown)"
 
+            op = self._operation
             if event.kind == ScanEventKind.FAILED:
                 self.status_label.setText(
-                    f"Scan failed: {event.message}; {summary}"
+                    f"{op} failed: {event.message}; {summary}"
                 )
             elif event.kind == ScanEventKind.CANCELLED:
                 self.status_label.setText(
-                    f"Scan cancelled; {summary}"
+                    f"{op} cancelled; {summary}"
                 )
             else:
                 self.status_label.setText(
-                    f"Scan finished ({event.scanned} directories); "
-                    f"{summary}"
+                    f"{op} finished "
+                    f"({event.scanned} directories); {summary}"
                 )
 
     def _store_candidate(
@@ -686,13 +911,8 @@ class BeamtimeListDialog(QDialog):
         item = self.table.itemAt(position)
         if item is None:
             return
-
-        path_item = self.table.item(
-            item.row(),
-            self.COL_PATH,
-        )
+        path_item = self.table.item(item.row(), self.COL_PATH)
         path = path_item.data(Qt.UserRole) if path_item else None
-
         if not isinstance(path, Path):
             return
 
@@ -700,13 +920,10 @@ class BeamtimeListDialog(QDialog):
         action = menu.addAction("Open Terminal Here")
         action.triggered.connect(
             lambda: open_terminal(
-                path,
-                on_error=self.status_label.setText,
+                path, on_error=self.status_label.setText
             )
         )
-        menu.exec(
-            self.table.viewport().mapToGlobal(position)
-        )
+        menu.exec(self.table.viewport().mapToGlobal(position))
 
     def done(self, result: int) -> None:
         self._refresh_timer.stop()

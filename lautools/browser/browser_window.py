@@ -142,9 +142,8 @@ class BrowserWindow(QMainWindow):
         self.exit_action.setShortcut("Ctrl+Q")
         self.exit_action.triggered.connect(self.close)
         # Beamtime
-        beamtime_menu = menu_bar.addMenu("&Beamtime")
-        self.find_beamtimes_action = beamtime_menu.addAction("List Beamtimes...")
-        self.find_beamtimes_action.triggered.connect(self.find_beamtimes)
+        self.beamtime_menu = menu_bar.addMenu("&Beamtime")
+        self.beamtime_menu.aboutToShow.connect(self._populate_beamtime_menu)
 
         project_menu = menu_bar.addMenu("&Project")
 
@@ -1337,33 +1336,157 @@ class BrowserWindow(QMainWindow):
             return
 
         self.status_label.setText(f"{count} beamtime(s) saved")
+    # ------------------------------------------------------------------
+    # Beamtime menu
+    # ------------------------------------------------------------------
 
-    def _populate_beamtime_menu(self):
-        self.beamtime_list_menu.clear()
+    @staticmethod
+    def _beamtime_year(beamtime) -> str:
+        parts = beamtime.core_path.parts if beamtime.core_path else ()
+        return parts[-3] if len(parts) >= 3 else ""
 
+    @staticmethod
+    def _beamtime_beamline(beamtime) -> str:
+        parts = beamtime.core_path.parts if beamtime.core_path else ()
+        return beamtime.beamline or (parts[-4] if len(parts) >= 4 else "")
+
+    def _beamtime_label(self, beamtime) -> str:
+        """beamline_year_beamtimeID, skipping unknown parts."""
+        parts = [
+            self._beamtime_beamline(beamtime),
+            self._beamtime_year(beamtime),
+            beamtime.beamtime_id,
+        ]
+        return "_".join(part for part in parts if part)
+
+    def _menu_beamtimes(self):
+        """Beamtimes ticked as listed; all beamtimes if none are ticked."""
         try:
             beamtimes = self.db.list_listed_beamtimes()
             if not beamtimes:
                 beamtimes = self.db.list_beamtimes()
         except Exception:
             log.exception("Cannot load beamtimes")
-            beamtimes = []
+            return []
 
+        return sorted(
+            beamtimes,
+            key=lambda b: (
+                self._beamtime_beamline(b).casefold(),
+                self._beamtime_year(b),
+                b.beamtime_id,
+            ),
+        )
+
+    def _populate_beamtime_menu(self):
+        self.beamtime_menu.clear()
+
+        beamtimes = self._menu_beamtimes()
         if not beamtimes:
-            action = self.beamtime_list_menu.addAction("(No saved beamtimes)")
+            action = self.beamtime_menu.addAction("(No saved beamtimes)")
             action.setEnabled(False)
             return
 
         for beamtime in beamtimes:
-            label = beamtime.beamtime_id
-            if beamtime.title:
-                label += f" – {beamtime.title}"
-            action = self.beamtime_list_menu.addAction(label)
-            action.setToolTip(str(beamtime.core_path or ""))
-            action.triggered.connect(
-                lambda checked=False, bt=beamtime:
-                    self.open_beamtime_scratch(bt)
+            submenu = self.beamtime_menu.addMenu(
+                self._beamtime_label(beamtime)
             )
+            tooltip = beamtime.title or str(beamtime.core_path or "")
+            submenu.menuAction().setToolTip(tooltip)
+            submenu.setToolTipsVisible(True)
+            # Fill lazily: scratch_cc is listed only when hovered.
+            submenu.aboutToShow.connect(
+                lambda menu=submenu, bt=beamtime:
+                    self._populate_beamtime_submenu(menu, bt)
+            )
+        self.beamtime_menu.addSeparator()
+        self.find_beamtimes_action = self.beamtime_menu.addAction("List Beamtimes...")
+        self.find_beamtimes_action.triggered.connect(self.find_beamtimes)
+        self.beamtime_menu.addAction(self.find_beamtimes_action)
+
+    def _beamtime_project_entries(self, beamtime) -> list[tuple[str, Path]]:
+        """Linked projects plus scratch_cc folders containing "kct".
+
+        Returns (label, path) pairs, deduplicated by path.
+        """
+        entries: dict[str, tuple[str, Path]] = {}
+
+        try:
+            linked = self.db.list_projects_for_beamtime(beamtime.id)
+        except Exception:
+            log.exception("Cannot load projects for %s", beamtime.beamtime_id)
+            linked = []
+
+        for project in linked:
+            entries[str(project.path)] = (project.name, project.path)
+
+        if beamtime.core_path is not None:
+            scratch = beamtime.core_path / "scratch_cc"
+            try:
+                folders = [
+                    entry for entry in scratch.iterdir()
+                    if entry.is_dir() and "kct" in entry.name.casefold()
+                ]
+            except OSError:
+                folders = []  # scratch_cc missing or unreadable
+
+            for folder in folders:
+                entries.setdefault(str(folder), (folder.name, folder))
+
+        return sorted(entries.values(), key=lambda e: e[0].casefold())
+
+    def _populate_beamtime_submenu(self, menu: QMenu, beamtime) -> None:
+        menu.clear()
+
+        entries = self._beamtime_project_entries(beamtime)
+        if not entries:
+            action = menu.addAction("(No projects or kct folders)")
+            action.setEnabled(False)
+        else:
+            current = (
+                str(self.current_project.path)
+                if self.current_project is not None else None
+            )
+            for label, path in entries:
+                action = menu.addAction(label)
+                action.setToolTip(str(path))
+                action.setCheckable(True)
+                action.setChecked(str(path) == current)
+                action.triggered.connect(
+                    lambda checked=False, p=path, bt=beamtime:
+                        self.open_beamtime_project(bt, p)
+                )
+
+        if beamtime.core_path is not None:
+            scratch = beamtime.core_path / "scratch_cc"
+            menu.addSeparator()
+            terminal = menu.addAction("Open Terminal in scratch_cc")
+            terminal.setEnabled(scratch.is_dir())
+            terminal.triggered.connect(
+                lambda checked=False, p=scratch: open_terminal(
+                    p,
+                    on_error=lambda error: self.status_label.setText(
+                        f"Error: {error}"
+                    ),
+                )
+            )
+
+    def open_beamtime_project(self, beamtime, path: Path) -> None:
+        """Open a folder as a project and link it to its beamtime."""
+        if not path.is_dir():
+            log.warning("Beamtime project path unavailable/not directory: %s", path)
+            self.status_label.setText(f"Project path is unavailable: {path}")
+            return
+
+        try:
+            project = self.project_manager.register_project(path)
+            self.project_manager.link_beamtime(project, beamtime)
+        except Exception as exc:
+            log.exception("Cannot open beamtime project: %s", path)
+            self.status_label.setText(f"Could not open project: {exc}")
+            return
+
+        self._activate_project(project)
 
     def open_beamtime_scratch(self, beamtime):
         """Open the beamtime's scratch_cc as a project directory."""

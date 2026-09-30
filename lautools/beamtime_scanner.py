@@ -282,6 +282,69 @@ def scan_beamtimes(
     ))
     return candidates
 
+def refresh_beamtimes(
+    paths: Iterable[Path],
+    known_on_gpfs: Iterable[Path] = (),
+    listener: ScanListener | None = None,
+    cancel: threading.Event | None = None,
+) -> list[BeamtimeCandidate]:
+    """Re-inspect known beamtime roots without crawling the GPFS tree.
+
+    Emits the same events as scan_beamtimes. OFFLOADED is emitted only when
+    a root recorded as on GPFS demonstrably no longer exists; unreadable or
+    unrecognizable directories are left untouched.
+    """
+    emit = listener or (lambda event: None)
+    known = {path_key(p) for p in known_on_gpfs}
+    candidates: list[BeamtimeCandidate] = []
+    scanned = 0
+    emit(ScanEvent(ScanEventKind.STARTED))
+
+    for path in paths:
+        if cancel is not None and cancel.is_set():
+            emit(ScanEvent(
+                ScanEventKind.CANCELLED, scanned=scanned, found=len(candidates)
+            ))
+            return candidates
+
+        path = Path(path)
+        scanned += 1
+        emit(ScanEvent(
+            ScanEventKind.PROGRESS,
+            scanned=scanned,
+            found=len(candidates),
+            current=path,
+        ))
+
+        candidate = inspect_candidate(path)
+        if candidate is not None and candidate.accepted:
+            candidates.append(candidate)
+            emit(ScanEvent(
+                ScanEventKind.FOUND,
+                candidate=candidate,
+                scanned=scanned,
+                found=len(candidates),
+            ))
+            continue
+
+        if path_key(path) in known:
+            try:
+                exists = path.exists()
+            except OSError:
+                continue
+            if not exists:
+                emit(ScanEvent(
+                    ScanEventKind.OFFLOADED,
+                    scanned=scanned,
+                    found=len(candidates),
+                    current=path,
+                ))
+
+    emit(ScanEvent(
+        ScanEventKind.FINISHED, scanned=scanned, found=len(candidates)
+    ))
+    return candidates
+
 
 class BeamtimeScanner:
     """Run the filesystem walk outside the GUI thread."""
@@ -321,6 +384,35 @@ class BeamtimeScanner:
 
         self._thread = threading.Thread(
             target=run, name="lautools-beamtime-scan", daemon=True
+        )
+        self._thread.start()
+
+    def start_refresh(
+        self,
+        paths: Iterable[Path],
+        known_on_gpfs: Iterable[Path] = (),
+    ) -> None:
+        """Re-inspect known beamtime roots on the worker thread."""
+        if self.running:
+            return
+        self._cancel.clear()
+        paths = tuple(paths)
+        known = tuple(known_on_gpfs)
+
+        def run() -> None:
+            try:
+                refresh_beamtimes(
+                    paths,
+                    known_on_gpfs=known,
+                    listener=self._listener,
+                    cancel=self._cancel,
+                )
+            except Exception as exc:
+                log.exception("Beamtime refresh failed")
+                self._listener(ScanEvent(ScanEventKind.FAILED, message=str(exc)))
+
+        self._thread = threading.Thread(
+            target=run, name="lautools-beamtime-refresh", daemon=True
         )
         self._thread.start()
 
