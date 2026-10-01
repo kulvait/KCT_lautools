@@ -143,7 +143,7 @@ class BeamtimeManager:
                 pass  # Keep previously recorded values.
             else:
                 previous.raw_subdir_count = len(subdirs)
-                previous.raw_subdir_samples = subdirs[:12]
+                previous.raw_subdir_samples = subdirs
         else:
             previous.raw_subdir_count = 0
             previous.raw_subdir_samples = []

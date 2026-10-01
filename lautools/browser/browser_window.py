@@ -1340,7 +1340,7 @@ class BrowserWindow(QMainWindow):
 
     def find_beamtimes(self):
         """Scan GPFS for accessible beamtimes and store the chosen ones."""
-        dialog = BeamtimeListDialog(self.project_manager, parent=self)
+        dialog = BeamtimeListDialog(self.project_manager, size_service=self.size_service, parent=self)
         dialog.exec()
 
         try:

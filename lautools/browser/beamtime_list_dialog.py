@@ -94,11 +94,12 @@ class BeamtimeListDialog(QDialog):
         COL_PATH,
     ) = range(16)
 
-    def __init__(self, project_manager, parent=None):
+    def __init__(self, project_manager, size_service=None, parent=None):
         super().__init__(parent)
 
         self.project_manager = project_manager
         self.db = project_manager.db
+        self.size_service = size_service
 
         self._known_paths: dict[str, int] = {}
         self._known_ids: set[str] = set()
@@ -962,22 +963,87 @@ class BeamtimeListDialog(QDialog):
     # Context menu
     # ------------------------------------------------------------------
 
+    def _open_beamtime_info(self, beamtime_id: int) -> None:
+        beamtime = self.db.get_beamtime(beamtime_id)
+        if beamtime is None:
+            self.status_label.setText("Beamtime no longer exists")
+            return
+
+        dialog = BeamtimeInfoDialog(
+            self.project_manager,
+            beamtime,
+            size_service=self.size_service,
+            parent=self,
+        )
+        dialog.exec()
+        self._load_from_db()
+
     def _show_context_menu(self, position) -> None:
         item = self.table.itemAt(position)
         if item is None:
             return
-        menu = QMenu(self)
-        rename_action = menu.addAction("Rename label")
-        rename_action.triggered.connect(lambda: self._rename_label(item.row()))
-        rename_to_default = menu.addAction("Restore default label")
-        rename_to_default.triggered.connect(lambda: self._reset_label_defult(item.row()))
-        path_item = self.table.item(item.row(), self.COL_PATH)
+
+        row = item.row()
+        listed_item = self.table.item(row, self.COL_SELECT)
+        if listed_item is None:
+            return
+
+        beamtime_id = listed_item.data(Qt.UserRole)
+        if beamtime_id is None:
+            return
+
+        path_item = self.table.item(row, self.COL_PATH)
         path = path_item.data(Qt.UserRole) if path_item else None
+
+        menu = QMenu(self)
+
+        info_action = menu.addAction("Beamtime Info...")
+        info_action.triggered.connect(
+            lambda _checked=False, bt_id=beamtime_id:
+                self._open_beamtime_info(bt_id)
+        )
+
         if isinstance(path, Path):
-            menu.addSeparator()
-            action = menu.addAction("Open Terminal Here")
-            action.triggered.connect(lambda: open_terminal(path, on_error=self.status_label.setText))
+            terminal_action = menu.addAction("Open Terminal Here")
+            terminal_action.triggered.connect(
+                lambda _checked=False, p=path: open_terminal(
+                    p, on_error=self.status_label.setText
+                )
+            )
+
+        menu.addSeparator()
+
+        rename_action = menu.addAction("Rename label")
+        rename_action.triggered.connect(
+            lambda _checked=False, bt_id=beamtime_id:
+                self._rename_label_by_id(bt_id)
+        )
+
+        restore_action = menu.addAction("Restore default label")
+        restore_action.triggered.connect(
+            lambda _checked=False, bt_id=beamtime_id:
+                self._reset_label_default_by_id(bt_id)
+        )
+
+
         menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def _row_for_beamtime_id(self, beamtime_id: int) -> int | None:
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.COL_SELECT)
+            if item is not None and item.data(Qt.UserRole) == beamtime_id:
+                return row
+        return None
+
+    def _rename_label_by_id(self, beamtime_id: int) -> None:
+        row = self._row_for_beamtime_id(beamtime_id)
+        if row is not None:
+            self._rename_label(row)
+
+    def _reset_label_default_by_id(self, beamtime_id: int) -> None:
+        row = self._row_for_beamtime_id(beamtime_id)
+        if row is not None:
+            self._reset_label_defult(row)
 
     def done(self, result: int) -> None:
         self._refresh_timer.stop()
