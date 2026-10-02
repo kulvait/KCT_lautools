@@ -1,5 +1,5 @@
 import sys
-import log
+import logging
 
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtGui import QFont
