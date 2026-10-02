@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QTableWidget,
+    QLineEdit, QMessageBox, QPushButton, QMenu, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -19,6 +19,7 @@ from lautools.browser.settings_store import (
     FolderEntry, LautoolsConfig, LautoolsLocation,
     load_settings, save_settings,
 )
+from lautools.browser.utils import open_terminal
 
 
 DEFAULT_UPSTREAM = (
@@ -250,6 +251,8 @@ class SettingsDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSortingEnabled(False)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemChanged.connect(self._role_changed)
         layout.addWidget(self.table, 1)
@@ -376,6 +379,73 @@ class SettingsDialog(QDialog):
     def _selected_entry(self):
         row = self.table.currentRow()
         return self.entries[row] if row >= 0 else None
+
+    def _entry_at_position(self, position):
+        item = self.table.itemAt(position)
+        if item is None:
+            return None
+        row = item.row()
+        if row < 0 or row >= len(self.entries):
+            return None
+        self.table.selectRow(row)
+        return self.entries[row]
+
+    def _show_context_menu(self, position):
+        entry = self._entry_at_position(position)
+        if entry is None:
+            return
+
+        location = entry.location
+        menu = QMenu(self)
+
+        if location.disk_location:
+            directory = Path(location.disk_location)
+            terminal_action = menu.addAction("Open Terminal Here")
+            terminal_action.setEnabled(
+                directory.exists() and directory.is_dir()
+            )
+            terminal_action.triggered.connect(
+                lambda _checked=False, p=directory: open_terminal(
+                    p,
+                    on_error=lambda msg: QMessageBox.warning(
+                        self,
+                        "Open terminal failed",
+                        msg,
+                    ),
+                )
+            )
+            menu.addSeparator()
+
+        if entry.use_as_recipe:
+            action = menu.addAction("Set as Default Recipe")
+            action.setEnabled(
+                self.config.default_recipe_location_id != location.id
+            )
+            action.triggered.connect(
+                lambda _checked=False, location_id=location.id:
+                    self._set_default_recipe(location_id)
+            )
+
+        if entry.use_as_workbench:
+            action = menu.addAction("Set as Default Workbench")
+            action.setEnabled(
+                self.config.default_workbench_location_id != location.id
+            )
+            action.triggered.connect(
+                lambda _checked=False, location_id=location.id:
+                    self._set_default_workbench(location_id)
+            )
+
+        if menu.actions():
+            menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def _set_default_recipe(self, location_id: int):
+        self.config.default_recipe_location_id = location_id
+        self._refresh_defaults()
+
+    def _set_default_workbench(self, location_id: int):
+        self.config.default_workbench_location_id = location_id
+        self._refresh_defaults()
 
     def _add(self):
         editor = LocationEditor(self._new_location(), self)

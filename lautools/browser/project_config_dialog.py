@@ -51,17 +51,17 @@ METADATA_FIELDS = (
     ("Title", "title"),
     ("Beamline", "beamline"),
     ("Beamline alias", "beamline_alias"),
-    ("Setup", "beamline_setup"),
-    ("Facility", "facility"),
+    ("Core path", "core_path"),
     ("Proposal ID", "proposal_id"),
     ("Proposal type", "proposal_type"),
-    ("Event start", "event_start"),
-    ("Event end", "event_end"),
-    ("Metadata generated", "generated"),
-    ("Core path", "core_path"),
+    ("Facility", "facility"),
+    ("Setup", "beamline_setup"),
     ("Contact", "contact"),
     ("Retention period", "retention_period"),
     ("Unix ID", "unix_id"),
+    ("Event start", "event_start"),
+    ("Event end", "event_end"),
+    ("Metadata generated", "generated"),
 )
 
 PEOPLE_FIELDS = (
@@ -288,6 +288,13 @@ class ProjectConfigDialog(QDialog):
 
         form = QFormLayout()
         self.metadata_labels: dict[str, QLabel] = {}
+        
+        # Beamtime notes at the top (equivalent to Description in BeamtimeInfoDialog)
+        self.beamtime_description_edit = QPlainTextEdit()
+        self.beamtime_description_edit.setMaximumHeight(80)
+        form.addRow("Beamtime notes:", self.beamtime_description_edit)
+        
+        # Reordered metadata fields to match BeamtimeInfoDialog
         for title, attribute in METADATA_FIELDS:
             label = QLabel("")
             label.setWordWrap(True)
@@ -295,16 +302,13 @@ class ProjectConfigDialog(QDialog):
             self.metadata_labels[attribute] = label
             form.addRow(f"{title}:", label)
 
+        # People fields before event dates
         for title, prefix in PEOPLE_FIELDS:
             label = QLabel("")
             label.setWordWrap(True)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             self.metadata_labels[prefix] = label
             form.addRow(f"{title}:", label)
-
-        self.beamtime_description_edit = QPlainTextEdit()
-        self.beamtime_description_edit.setMaximumHeight(80)
-        form.addRow("Beamtime notes:", self.beamtime_description_edit)
 
         layout.addLayout(form)
         return box
