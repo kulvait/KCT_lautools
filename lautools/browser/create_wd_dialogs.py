@@ -1,4 +1,5 @@
 import sys
+import log
 
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtGui import QFont
@@ -15,6 +16,20 @@ from PySide6.QtWidgets import (
 )
 
 SCRIPT_MODULE = "lautools.scripts.createWorkingDirectoryForMicrotomography"
+
+log = logging.getLogger(__name__)
+
+if not log.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
+        datefmt="%d.%m.%Y %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+
+log.propagate = False
 
 
 def script_command(*args):

@@ -35,6 +35,7 @@ from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
 from lautools.browser.beamtime_list_dialog import BeamtimeListDialog
 from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
 from lautools.browser.project_manager import ProjectManager
+from lautools.browser.new_project_from_recipe_dialog import (NewProjectFromRecipeDialog,)
 from lautools.browser.utils import (
     open_files_mousepad,
     open_files_vim,
@@ -1496,16 +1497,13 @@ class BrowserWindow(QMainWindow):
         Returns (label, path) pairs, deduplicated by path.
         """
         entries: dict[str, tuple[str, Path]] = {}
-
         try:
             linked = self.db.list_projects_for_beamtime(beamtime.id)
         except Exception:
             log.exception("Cannot load projects for %s", beamtime.beamtime_id)
             linked = []
-
         for project in linked:
             entries[str(project.path)] = (project.name, project.path)
-
         if beamtime.core_path is not None:
             scratch = beamtime.core_path / "scratch_cc"
             try:
@@ -1525,15 +1523,6 @@ class BrowserWindow(QMainWindow):
         menu.clear()
         info_dialog_action = menu.addAction("Beamtime Info...")
         info_dialog_action.triggered.connect(lambda checked=False, bt=beamtime: self.open_beamtime_dialog(bt))
-        create_action = menu.addAction("New project from recipe...")
-        create_action.setEnabled(
-            beamtime.core_path is not None
-            and (beamtime.core_path / "scratch_cc").is_dir()
-        )
-        create_action.triggered.connect(
-            lambda checked=False, bt=beamtime:
-                self.new_project_from_recipe(bt)
-        )
         if beamtime.core_path is not None:
             terminal = menu.addAction("Terminal")
             terminal.setEnabled(beamtime.core_path.is_dir())
@@ -1541,14 +1530,7 @@ class BrowserWindow(QMainWindow):
             scratch = beamtime.core_path / "scratch_cc"
             terminal_scratch = menu.addAction("Terminal in scratch_cc")
             terminal_scratch.setEnabled(scratch.is_dir())
-            terminal_scratch.triggered.connect(
-                lambda checked=False, p=scratch: open_terminal_scratch(
-                    p,
-                    on_error=lambda error: self.status_label.setText(
-                        f"Error: {error}"
-                    ),
-                )
-            )
+            terminal_scratch.triggered.connect(lambda checked=False, p=scratch: open_terminal(p, on_error=lambda error: self.status_label.setText(f"Error: {error}")))
         menu.addSeparator()
         entries = self._beamtime_project_entries(beamtime)
         if not entries:
@@ -1568,6 +1550,15 @@ class BrowserWindow(QMainWindow):
                     lambda checked=False, p=path, bt=beamtime:
                         self.open_beamtime_project(bt, p)
                 )
+        create_action = menu.addAction("New project from recipe...")
+        create_action.setEnabled(
+            beamtime.core_path is not None
+            and (beamtime.core_path / "scratch_cc").is_dir()
+        )
+        create_action.triggered.connect(
+            lambda checked=False, bt=beamtime:
+                self.new_project_from_recipe(bt)
+        )
 
 
     def open_beamtime_project(self, beamtime, path: Path) -> None:
@@ -1619,6 +1610,7 @@ class BrowserWindow(QMainWindow):
             log.exception("Cannot open new project: %s", new_project_path)
             self.status_label.setText(f"Could not open project: {exc}")
             return
+        self._activate_project(project)
 
     def open_beamtime_scratch(self, beamtime):
         """Open the beamtime's scratch_cc as a project directory."""

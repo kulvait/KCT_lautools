@@ -381,10 +381,10 @@ class SettingsDialog(QDialog):
         return self.entries[row] if row >= 0 else None
 
     def _entry_at_position(self, position):
-        item = self.table.itemAt(position)
-        if item is None:
+        index = self.table.indexAt(position)
+        if not index.isValid():
             return None
-        row = item.row()
+        row = index.row()
         if row < 0 or row >= len(self.entries):
             return None
         self.table.selectRow(row)

@@ -14,14 +14,14 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
 if not log.handlers:
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
         datefmt="%d.%m.%Y %H:%M:%S",
     )
-    ch.setFormatter(formatter)
-    log.addHandler(ch)
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
 
 log.propagate = False
 
