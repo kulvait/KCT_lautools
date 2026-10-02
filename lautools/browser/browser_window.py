@@ -1525,6 +1525,15 @@ class BrowserWindow(QMainWindow):
         menu.clear()
         info_dialog_action = menu.addAction("Beamtime Info...")
         info_dialog_action.triggered.connect(lambda checked=False, bt=beamtime: self.open_beamtime_dialog(bt))
+        create_action = menu.addAction("New project from recipe...")
+        create_action.setEnabled(
+            beamtime.core_path is not None
+            and (beamtime.core_path / "scratch_cc").is_dir()
+        )
+        create_action.triggered.connect(
+            lambda checked=False, bt=beamtime:
+                self.new_project_from_recipe(bt)
+        )
         if beamtime.core_path is not None:
             terminal = menu.addAction("Terminal")
             terminal.setEnabled(beamtime.core_path.is_dir())
@@ -1575,8 +1584,41 @@ class BrowserWindow(QMainWindow):
             log.exception("Cannot open beamtime project: %s", path)
             self.status_label.setText(f"Could not open project: {exc}")
             return
-
         self._activate_project(project)
+
+    def new_project_from_recipe(self, beamtime) -> None:
+        """Create a new project from a recipe in the beamtime's scratch_cc."""
+        if beamtime.core_path is None:
+            self.status_label.setText("Beamtime has no known path")
+            return
+        scratch = beamtime.core_path / "scratch_cc"
+        if not scratch.is_dir():
+            QMessageBox.warning(
+                self,
+                "scratch_cc unavailable",
+                f"The directory does not exist:\n{scratch}",
+            )
+            return
+        dialog = NewProjectFromRecipeDialog(
+            self.project_manager,
+            beamtime,
+            scratch,
+            size_service=self.size_service,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        new_project_path = dialog.selected_project_path()
+        if new_project_path is None:
+            self.status_label.setText("No project created")
+            return
+        try:
+            project = self.project_manager.register_project(new_project_path)
+            self.project_manager.link_beamtime(project, beamtime)
+        except Exception as exc:
+            log.exception("Cannot open new project: %s", new_project_path)
+            self.status_label.setText(f"Could not open project: {exc}")
+            return
 
     def open_beamtime_scratch(self, beamtime):
         """Open the beamtime's scratch_cc as a project directory."""
