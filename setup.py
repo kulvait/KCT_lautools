@@ -1,25 +1,23 @@
 import subprocess
 from pathlib import Path
+from git import Repo, InvalidGitRepositoryError, NoSuchPathError
 
 from setuptools import setup, find_packages
 from setuptools.command.build_py import build_py
+
 
 class BuildPy(build_py):
     def run(self):
         super().run()
 
         try:
-            commit = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
+            repo = Repo(Path(__file__).resolve().parent, search_parent_directories=True)
+            commit = repo.head.commit.hexsha
+        except (InvalidGitRepositoryError, NoSuchPathError):
             commit = "unknown"
 
         target = Path(self.build_lib) / "lautools" / "build_info.py"
         target.write_text(f'GIT_COMMIT = "{commit}"\n')
-
 
 try:
     exec(open("lautools/version.py").read())
@@ -33,16 +31,16 @@ pkg_requires = [
     "zarr",
     "scipy",
     "pandas",
-    "imagecodecs>=2026.6.6",
+    "imagecodecs>=2026.8.16",
     "scikit-image",
     "termcolor",
     "platformdirs",
+    "GitPython",
 ]
 
 extras = {
     "gui": [
         "pyside6",
-        "wxPython",
     ],
     "gpu": [
         "redis",
@@ -51,7 +49,6 @@ extras = {
     ],
     "full": [
         "pyside6",
-        "wxPython",
         "redis",
         "pycuda",
         "pyopencl",

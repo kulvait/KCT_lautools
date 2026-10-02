@@ -182,3 +182,56 @@ CREATE INDEX IF NOT EXISTS lautools_app_history_opened_at_idx
 
 CREATE INDEX IF NOT EXISTS lautools_app_history_project_opened_at_idx
     ON lautools_app_history(project_id, opened_at);
+
+-- ---------------------------------------------------------------------
+-- Program folder management: pipelines, paths, and other settings
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS lautools_location (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+
+    disk_location TEXT,
+    upstream TEXT,
+
+    -- Cached inspection result: NULL means unknown/unavailable.
+    git_managed INTEGER CHECK (git_managed IN (0, 1)),
+    git_root TEXT,
+    git_subdir TEXT,
+
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+
+    CHECK (
+        NULLIF(TRIM(disk_location), '') IS NOT NULL
+        OR NULLIF(TRIM(upstream), '') IS NOT NULL
+    )
+);
+
+CREATE TABLE IF NOT EXISTS lautools_pipelines (
+    location_id INTEGER PRIMARY KEY
+        REFERENCES lautools_location(id) ON DELETE CASCADE,
+
+    use_as_recipe INTEGER NOT NULL DEFAULT 0
+        CHECK (use_as_recipe IN (0, 1)),
+    use_as_workbench INTEGER NOT NULL DEFAULT 0
+        CHECK (use_as_workbench IN (0, 1)),
+
+    CHECK (use_as_recipe = 1 OR use_as_workbench = 1)
+);
+
+CREATE TABLE IF NOT EXISTS lautools_paths (
+    location_id INTEGER PRIMARY KEY
+        REFERENCES lautools_location(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS lautools_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+
+    default_recipe_location_id INTEGER
+        REFERENCES lautools_pipelines(location_id) ON DELETE SET NULL,
+    default_workbench_location_id INTEGER
+        REFERENCES lautools_pipelines(location_id) ON DELETE SET NULL,
+
+    updated_at TEXT NOT NULL
+);

@@ -29,10 +29,11 @@ from lautools.browser.create_wd_dialogs import (
     SampleSelectionDialog,
     script_command,
 )
+from lautools.browser.settings_dialog import SettingsDialog
+from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
 from lautools.browser.beamtime_list_dialog import BeamtimeListDialog
 from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
-from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.project_manager import ProjectManager
 from lautools.browser.utils import (
     open_files_mousepad,
@@ -135,12 +136,8 @@ class BrowserWindow(QMainWindow):
         menu_bar = self.menuBar()
         # File
         file_menu = menu_bar.addMenu("&File")
-        self.open_action = file_menu.addAction("Open Project...")
-        self.open_action.setShortcut("Ctrl+O")
-        self.open_action.triggered.connect(self.open_project)
-        self.close_action = file_menu.addAction("Close Project")
-        self.close_action.setShortcut("Ctrl+W")
-        self.close_action.triggered.connect(self.close_project)
+        settings_action = file_menu.addAction("Settings...")
+        settings_action.triggered.connect(self.open_settings)
         file_menu.addSeparator()
         self.exit_action = file_menu.addAction("Exit App")
         self.exit_action.setShortcut("Ctrl+Q")
@@ -148,8 +145,14 @@ class BrowserWindow(QMainWindow):
         # Beamtime
         self.beamtime_menu = menu_bar.addMenu("&Beamtime")
         self.beamtime_menu.aboutToShow.connect(self._populate_beamtime_menu)
-
+        # Project
         project_menu = menu_bar.addMenu("&Project")
+        self.open_action = project_menu.addAction("Open Project...")
+        self.open_action.setShortcut("Ctrl+O")
+        self.open_action.triggered.connect(self.open_project)
+        self.close_action = project_menu.addAction("Close Project")
+        self.close_action.setShortcut("Ctrl+W")
+        self.close_action.triggered.connect(self.close_project)
 
         self.configure_action = project_menu.addAction("Configure...")
         self.configure_action.triggered.connect(self.configure_project)
@@ -190,6 +193,9 @@ class BrowserWindow(QMainWindow):
         help_menu.addSeparator()
         about_action = help_menu.addAction("About Lautools")
         about_action.triggered.connect(self._show_about)
+
+    def open_settings(self):
+        SettingsDialog(self.db, parent=self).exec()
 
     def _open_project_terminal(self):
         if self.current_project is None:
@@ -1520,11 +1526,14 @@ class BrowserWindow(QMainWindow):
         info_dialog_action = menu.addAction("Beamtime Info...")
         info_dialog_action.triggered.connect(lambda checked=False, bt=beamtime: self.open_beamtime_dialog(bt))
         if beamtime.core_path is not None:
+            terminal = menu.addAction("Terminal")
+            terminal.setEnabled(beamtime.core_path.is_dir())
+            terminal.triggered.connect(lambda checked=False, p=beamtime.core_path: open_terminal(p, on_error=lambda error: self.status_label.setText(f"Error: {error}")))
             scratch = beamtime.core_path / "scratch_cc"
-            terminal = menu.addAction("Open Terminal in scratch_cc")
-            terminal.setEnabled(scratch.is_dir())
-            terminal.triggered.connect(
-                lambda checked=False, p=scratch: open_terminal(
+            terminal_scratch = menu.addAction("Terminal in scratch_cc")
+            terminal_scratch.setEnabled(scratch.is_dir())
+            terminal_scratch.triggered.connect(
+                lambda checked=False, p=scratch: open_terminal_scratch(
                     p,
                     on_error=lambda error: self.status_label.setText(
                         f"Error: {error}"
