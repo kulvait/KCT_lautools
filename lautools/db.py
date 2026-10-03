@@ -161,6 +161,50 @@ class AppHistory:
     project_id: int | None = None
     workspace_id: int | None = None
     action: str | None = None
+ 
+@dataclass
+class LautoolsLocation:
+    id: int | None
+    name: str
+    disk_location: Path | None = None
+    upstream: str | None = None
+    git_managed: bool | None = None
+    git_root: Path | None = None
+    git_subdir: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass
+class LaupyRecipeCollection:
+    location_id: int
+    use_as_cookbook: bool = False
+    use_as_workbench: bool = False
+
+
+@dataclass
+class LaupyRecipeInstance:
+    id: int | None
+    collection_location_id: int
+    name: str
+    relative_path: Path
+    source_instance_id: int | None = None
+    created_at: datetime | None = None
+    cloned_at: datetime | None = None
+    last_inspected: datetime | None = None
+
+
+@dataclass
+class LautoolsPath:
+    location_id: int
+    position: int = 0
+
+
+@dataclass
+class LautoolsConfig:
+    default_cookbook_location_id: int | None = None
+    default_workbench_location_id: int | None = None
+    updated_at: datetime | None = None
 
 
 class LaupyDB:
@@ -187,171 +231,9 @@ class LaupyDB:
             raise
 
     def _init_schema(self) -> None:
-        self.connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS beamtime (
-                id INTEGER PRIMARY KEY,
-                beamtime_id TEXT NOT NULL UNIQUE,
-                label TEXT,
-                beamline TEXT,
-                beamline_alias TEXT,
-                beamline_setup TEXT,
-                facility TEXT,
-
-                proposal_id TEXT,
-                proposal_type TEXT,
-
-                event_start TEXT,
-                event_end TEXT,
-                generated TEXT,
-
-                core_path TEXT,
-
-                applicant_username TEXT,
-                applicant_lastname TEXT,
-                applicant_institute TEXT,
-                applicant_email TEXT,
-                applicant_user_id TEXT,
-
-                contact TEXT,
-
-                leader_username TEXT,
-                leader_lastname TEXT,
-                leader_institute TEXT,
-                leader_email TEXT,
-                leader_user_id TEXT,
-
-                pi_username TEXT,
-                pi_lastname TEXT,
-                pi_institute TEXT,
-                pi_email TEXT,
-                pi_user_id TEXT,
-
-                retention_period TEXT,
-                title TEXT,
-                description TEXT,
-                unix_id TEXT,
-
-                users_door_db TEXT,
-                users_special TEXT,
-                users_unknown TEXT,
-
-                metadata_json TEXT,
-
-                created_at TEXT NOT NULL,
-                updated_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS beamtime_storage (
-                beamtime_id INTEGER PRIMARY KEY
-                    REFERENCES beamtime(id) ON DELETE CASCADE,
-
-                on_gpfs INTEGER,
-                on_tape INTEGER,
-                last_on_gpfs TEXT,
-
-                raw_exists INTEGER,
-                raw_subdir_count INTEGER,
-                raw_subdir_samples TEXT,
-                raw_size_bytes INTEGER,
-                raw_size_bytes_timestamp TEXT,
-
-                processed_exists INTEGER,
-                processed_size_bytes INTEGER,
-                processed_size_bytes_timestamp TEXT,
-
-                scratch_cc_exists INTEGER,
-                scratch_cc_writable INTEGER,
-                scratch_cc_size_bytes INTEGER,
-                scratch_cc_size_bytes_timestamp TEXT,
-
-                shared_exists INTEGER,
-
-                last_inspected TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS laupy_project (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                description TEXT,
-                created_at TEXT NOT NULL,
-
-                project_size_bytes INTEGER,
-                project_size_bytes_timestamp TEXT,
-                last_inspected TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS laupy_project_workspace (
-                id INTEGER PRIMARY KEY,
-                project_id INTEGER NOT NULL
-                    REFERENCES laupy_project(id) ON DELETE CASCADE,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                description TEXT,
-                created_at TEXT NOT NULL,
-
-                workspace_size_bytes INTEGER,
-                workspace_size_bytes_timestamp TEXT,
-                last_inspected TEXT,
-
-                UNIQUE (project_id, name),
-                UNIQUE (id, project_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS laupy_project_workspace_project_id_idx
-                ON laupy_project_workspace(project_id);
-
-            CREATE TABLE IF NOT EXISTS beamtime_project_link (
-                beamtime_id INTEGER NOT NULL
-                    REFERENCES beamtime(id) ON DELETE CASCADE,
-                project_id INTEGER NOT NULL
-                    REFERENCES laupy_project(id) ON DELETE CASCADE,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (beamtime_id, project_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS beamtime_project_link_project_id_idx
-                ON beamtime_project_link(project_id);
-
-            CREATE TABLE IF NOT EXISTS lautools_app_listed_beamtime (
-                beamtime_id INTEGER PRIMARY KEY
-                    REFERENCES beamtime(id) ON DELETE CASCADE,
-                listed_at TEXT NOT NULL,
-                last_access TEXT,
-                pinned INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS lautools_app_listed_project (
-                project_id INTEGER PRIMARY KEY
-                    REFERENCES laupy_project(id) ON DELETE CASCADE,
-                listed_at TEXT NOT NULL,
-                last_access TEXT,
-                pinned INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS lautools_app_history (
-                id INTEGER PRIMARY KEY,
-                opened_at TEXT NOT NULL,
-                project_id INTEGER
-                    REFERENCES laupy_project(id) ON DELETE CASCADE,
-                workspace_id INTEGER,
-                action TEXT,
-
-                FOREIGN KEY (workspace_id, project_id)
-                    REFERENCES laupy_project_workspace(id, project_id)
-                    ON DELETE CASCADE,
-
-                CHECK (workspace_id IS NULL OR project_id IS NOT NULL)
-            );
-
-            CREATE INDEX IF NOT EXISTS lautools_app_history_opened_at_idx
-                ON lautools_app_history(opened_at);
-
-            CREATE INDEX IF NOT EXISTS lautools_app_history_project_opened_at_idx
-                ON lautools_app_history(project_id, opened_at);
-            """
-        )
+        schema_path = Path(__file__).with_name("schema.sql")
+        schema = schema_path.read_text(encoding="utf-8")
+        self.connection.executescript(schema)
         self.connection.commit()
 
     def _row_to_beamtime(self, row) -> Beamtime:
@@ -474,6 +356,47 @@ class LaupyDB:
             project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             action=row["action"],
+        )
+
+    def _row_to_location(self, row) -> LautoolsLocation:
+        return LautoolsLocation(
+            id=row["id"],
+            name=row["name"],
+            disk_location=Path(row["disk_location"]) if row["disk_location"] else None,
+            upstream=row["upstream"],
+            git_managed=(
+                bool(row["git_managed"])
+                if row["git_managed"] is not None else None
+            ),
+            git_root=Path(row["git_root"]) if row["git_root"] else None,
+            git_subdir=row["git_subdir"],
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+        )
+
+    def _row_to_recipe_collection(self, row) -> LaupyRecipeCollection:
+        return LaupyRecipeCollection(
+            location_id=row["location_id"],
+            use_as_cookbook=bool(row["use_as_cookbook"]),
+            use_as_workbench=bool(row["use_as_workbench"]),
+        )
+
+    def _row_to_recipe_instance(self, row) -> LaupyRecipeInstance:
+        return LaupyRecipeInstance(
+            id=row["id"],
+            collection_location_id=row["collection_location_id"],
+            name=row["name"],
+            relative_path=Path(row["relative_path"]),
+            source_instance_id=row["source_instance_id"],
+            created_at=_parse_dt(row["created_at"]),
+            cloned_at=_parse_dt(row["cloned_at"]),
+            last_inspected=_parse_dt(row["last_inspected"]),
+        )
+
+    def _row_to_path_entry(self, row) -> LautoolsPath:
+        return LautoolsPath(
+            location_id=row["location_id"],
+            position=row["position"],
         )
 
     def add_beamtime(self, beamtime: Beamtime) -> Beamtime:
@@ -952,3 +875,247 @@ class LaupyDB:
             """
         ).fetchall()
         return [self._row_to_beamtime(r) for r in rows]
+
+
+    # ------------------------------------------------------------------
+    # Locations / collections / recipe instances
+    # ------------------------------------------------------------------
+
+    def list_locations(self) -> list[LautoolsLocation]:
+        rows = self.connection.execute(
+            "SELECT * FROM lautools_location ORDER BY name COLLATE NOCASE, id"
+        ).fetchall()
+        return [self._row_to_location(r) for r in rows]
+
+    def get_location(self, location_id: int) -> LautoolsLocation | None:
+        row = self.connection.execute(
+            "SELECT * FROM lautools_location WHERE id = ?",
+            (location_id,),
+        ).fetchone()
+        return self._row_to_location(row) if row else None
+
+    def add_location(self, location: LautoolsLocation) -> LautoolsLocation:
+        now = _iso(_now())
+        self.connection.execute(
+            """
+            INSERT INTO lautools_location (
+                name, disk_location, upstream, git_managed,
+                git_root, git_subdir, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                location.name,
+                str(location.disk_location) if location.disk_location else None,
+                location.upstream,
+                int(location.git_managed) if location.git_managed is not None else None,
+                str(location.git_root) if location.git_root else None,
+                location.git_subdir,
+                _iso(location.created_at or _now()),
+                now,
+            ),
+        )
+        row = self.connection.execute(
+            "SELECT * FROM lautools_location ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return self._row_to_location(row)
+
+    def update_location(self, location: LautoolsLocation) -> LautoolsLocation:
+        if location.id is None:
+            raise ValueError("Location has not been saved")
+        self.connection.execute(
+            """
+            UPDATE lautools_location
+            SET name = ?, disk_location = ?, upstream = ?, git_managed = ?,
+                git_root = ?, git_subdir = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                location.name,
+                str(location.disk_location) if location.disk_location else None,
+                location.upstream,
+                int(location.git_managed) if location.git_managed is not None else None,
+                str(location.git_root) if location.git_root else None,
+                location.git_subdir,
+                _iso(_now()),
+                location.id,
+            ),
+        )
+        row = self.connection.execute(
+            "SELECT * FROM lautools_location WHERE id = ?",
+            (location.id,),
+        ).fetchone()
+        return self._row_to_location(row)
+
+    def remove_location(self, location_id: int) -> None:
+        self.connection.execute(
+            "DELETE FROM lautools_location WHERE id = ?",
+            (location_id,),
+        )
+
+    def list_recipe_collections(self) -> list[LaupyRecipeCollection]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM laupy_recipe_collections
+            ORDER BY location_id
+            """
+        ).fetchall()
+        return [self._row_to_recipe_collection(r) for r in rows]
+
+    def get_recipe_collection(
+        self,
+        location_id: int,
+    ) -> LaupyRecipeCollection | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM laupy_recipe_collections
+            WHERE location_id = ?
+            """,
+            (location_id,),
+        ).fetchone()
+        return self._row_to_recipe_collection(row) if row else None
+
+    def upsert_recipe_collection(
+        self,
+        collection: LaupyRecipeCollection,
+    ) -> LaupyRecipeCollection:
+        self.connection.execute(
+            """
+            INSERT INTO laupy_recipe_collections (
+                location_id, use_as_cookbook, use_as_workbench
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(location_id) DO UPDATE SET
+                use_as_cookbook = excluded.use_as_cookbook,
+                use_as_workbench = excluded.use_as_workbench
+            """,
+            (
+                collection.location_id,
+                int(collection.use_as_cookbook),
+                int(collection.use_as_workbench),
+            ),
+        )
+        row = self.connection.execute(
+            """
+            SELECT * FROM laupy_recipe_collections
+            WHERE location_id = ?
+            """,
+            (collection.location_id,),
+        ).fetchone()
+        return self._row_to_recipe_collection(row)
+
+    def remove_recipe_collection(self, location_id: int) -> None:
+        self.connection.execute(
+            "DELETE FROM laupy_recipe_collections WHERE location_id = ?",
+            (location_id,),
+        )
+
+    def list_recipe_instances_for_collection(
+        self,
+        collection_location_id: int,
+    ) -> list[LaupyRecipeInstance]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM laupy_recipe_instances
+            WHERE collection_location_id = ?
+            ORDER BY name COLLATE NOCASE, id
+            """,
+            (collection_location_id,),
+        ).fetchall()
+        return [self._row_to_recipe_instance(r) for r in rows]
+
+    def get_recipe_instance(
+        self,
+        recipe_instance_id: int,
+    ) -> LaupyRecipeInstance | None:
+        row = self.connection.execute(
+            "SELECT * FROM laupy_recipe_instances WHERE id = ?",
+            (recipe_instance_id,),
+        ).fetchone()
+        return self._row_to_recipe_instance(row) if row else None
+
+    def add_recipe_instance(
+        self,
+        recipe_instance: LaupyRecipeInstance,
+    ) -> LaupyRecipeInstance:
+        self.connection.execute(
+            """
+            INSERT INTO laupy_recipe_instances (
+                collection_location_id, name, relative_path,
+                source_instance_id, created_at, cloned_at, last_inspected
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                recipe_instance.collection_location_id,
+                recipe_instance.name,
+                str(recipe_instance.relative_path),
+                recipe_instance.source_instance_id,
+                _iso(recipe_instance.created_at or _now()),
+                _iso(recipe_instance.cloned_at),
+                _iso(recipe_instance.last_inspected),
+            ),
+        )
+        row = self.connection.execute(
+            "SELECT * FROM laupy_recipe_instances ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return self._row_to_recipe_instance(row)
+
+    def update_recipe_instance(
+        self,
+        recipe_instance: LaupyRecipeInstance,
+    ) -> LaupyRecipeInstance:
+        if recipe_instance.id is None:
+            raise ValueError("Recipe instance has not been saved")
+        self.connection.execute(
+            """
+            UPDATE laupy_recipe_instances
+            SET collection_location_id = ?, name = ?, relative_path = ?,
+                source_instance_id = ?, cloned_at = ?, last_inspected = ?
+            WHERE id = ?
+            """,
+            (
+                recipe_instance.collection_location_id,
+                recipe_instance.name,
+                str(recipe_instance.relative_path),
+                recipe_instance.source_instance_id,
+                _iso(recipe_instance.cloned_at),
+                _iso(recipe_instance.last_inspected),
+                recipe_instance.id,
+            ),
+        )
+        row = self.connection.execute(
+            "SELECT * FROM laupy_recipe_instances WHERE id = ?",
+            (recipe_instance.id,),
+        ).fetchone()
+        return self._row_to_recipe_instance(row)
+
+    def get_config(self) -> LautoolsConfig:
+        row = self.connection.execute(
+            "SELECT * FROM lautools_config WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return LautoolsConfig()
+        return LautoolsConfig(
+            default_cookbook_location_id=row["default_cookbook_location_id"],
+            default_workbench_location_id=row["default_workbench_location_id"],
+            updated_at=_parse_dt(row["updated_at"])
+        )
+
+    def set_config(self, config: LautoolsConfig) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO lautools_config (
+                id, default_cookbook_location_id,
+                default_workbench_location_id, updated_at
+            ) VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                default_cookbook_location_id =
+                    excluded.default_cookbook_location_id,
+                default_workbench_location_id =
+                    excluded.default_workbench_location_id,
+                updated_at = excluded.updated_at
+            """,
+            (
+                config.default_cookbook_location_id,
+                config.default_workbench_location_id,
+                _iso(_now()),
+            ),
+        )

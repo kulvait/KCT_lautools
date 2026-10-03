@@ -207,26 +207,13 @@ CREATE TABLE IF NOT EXISTS lautools_location (
     )
 );
 
--- Legacy table to be replaced by laupy_recipe_collections
-CREATE TABLE IF NOT EXISTS lautools_pipelines (
-    location_id INTEGER PRIMARY KEY
-        REFERENCES lautools_location(id) ON DELETE CASCADE,
-
-    use_as_recipe INTEGER NOT NULL DEFAULT 0
-        CHECK (use_as_recipe IN (0, 1)),
-    use_as_workbench INTEGER NOT NULL DEFAULT 0
-        CHECK (use_as_workbench IN (0, 1)),
-
-    CHECK (use_as_recipe = 1 OR use_as_workbench = 1)
-);
-
-
+-- Collections of pipelines and other files, which can be used as cookbooks or workbenches.
 CREATE TABLE IF NOT EXISTS laupy_recipe_collections (
     location_id INTEGER PRIMARY KEY
         REFERENCES lautools_location(id) ON DELETE CASCADE,
 
     use_as_cookbook INTEGER NOT NULL DEFAULT 0
-        CHECK (use_as_template_source IN (0, 1)),
+        CHECK (use_as_cookbook IN (0, 1)),
     use_as_workbench INTEGER NOT NULL DEFAULT 0
         CHECK (use_as_workbench IN (0, 1)),
 

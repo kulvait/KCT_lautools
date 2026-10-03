@@ -4,6 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 import os
 import sys
+import logging
+import shutil
 
 from git import Repo
 from git.exc import GitError, InvalidGitRepositoryError
@@ -21,10 +23,25 @@ from lautools.browser.settings_store import (
 )
 from lautools.browser.utils import open_terminal
 
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 
-DEFAULT_UPSTREAM = (
-    "https://github.com/kulvait/KCT_laupy_pipelines.git"
-)
+if not log.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
+        datefmt="%d.%m.%Y %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+
+log.propagate = False
+
+
+DEFAULT_COOKBOOK_UPSTREAM = ("https://github.com/kulvait/KCT_laupy_pipelines.git")
+DEFAULT_COOKBOOK_NAME = "Laupy pipelines cookbook"
+DEFAULT_COOKBOOK_DIRNAME = "laupy-pipelines"
 
 
 def inspect_git(location: LautoolsLocation) -> tuple[LautoolsLocation, str]:
@@ -159,42 +176,41 @@ class LocationEditor(QDialog):
             return
         self.accept()
 
-
-class DefaultSetupThread(QThread):
-    """Filesystem operations only; never accesses the SQLite connection."""
-    completed = Signal()
+class GitCloneThread(QThread):
+    completed = Signal(Path)
     failed = Signal(str)
 
-    def __init__(self, root: Path, parent=None):
+    def __init__(
+        self,
+        repository: str,
+        clone_destination: Path,
+        parent=None,
+    ):
         super().__init__(parent)
-        self.root = root
+        self.repository = repository
+        self.clone_destination = clone_destination
 
     def run(self):
-        recipe = self.root / "laupy-pipelines"
-        workbench = self.root / "workbench"
+        destination = self.clone_destination
+        if os.path.lexists(destination):
+            self.failed.emit(f"Destination already exists, aborting clone: {destination}")
+            return
         try:
-            # lexists also detects dangling symlinks.
-            if os.path.lexists(recipe) or os.path.lexists(workbench):
-                raise ValueError(
-                    "A default destination already exists. "
-                    "Register it manually; nothing will be overwritten."
-                )
-            repo = Repo.clone_from(DEFAULT_UPSTREAM, recipe)
-            repo.close()
-            repo = Repo.init(workbench)
+            repo = Repo.clone_from(self.repository, destination)
             repo.close()
         except Exception as exc:
-            self.failed.emit(
-                f"{exc}\n\n"
-                "Any created directories have been left on disk. "
-                "No database defaults were saved."
-            )
+            msg = (f"Failed to clone {self.repository} into {destination}: {exc}")
+            if os.path.lexists(destination):
+                try:
+                    shutil.rmtree(destination)
+                except Exception as cleanup_exc:
+                    msg += f"\nCleanup failed: {cleanup_exc}"
+            self.failed.emit(msg)
         else:
-            self.completed.emit()
-
+            self.completed.emit(destination)
 
 class SettingsDialog(QDialog):
-    NAME, DIRECTORY, UPSTREAM, GIT, RECIPE, WORKBENCH, PATH = range(7)
+    NAME, DIRECTORY, UPSTREAM, GIT, COOKBOOK, WORKBENCH, PATH = range(7)
 
     def __init__(self, db, parent=None):
         super().__init__(parent)
@@ -232,12 +248,12 @@ class SettingsDialog(QDialog):
 
         defaults = QGroupBox("Default project folders")
         form = QFormLayout(defaults)
-        self.recipe_combo = QComboBox()
-        self.workbench_combo = QComboBox()
-        form.addRow("Recipes:", self.recipe_combo)
-        form.addRow("Workbench:", self.workbench_combo)
-        self.recipe_combo.currentIndexChanged.connect(self._defaults_changed)
-        self.workbench_combo.currentIndexChanged.connect(
+        self.default_cookbook_combo = QComboBox()
+        self.default_workbench_combo = QComboBox()
+        form.addRow("Cookbook:", self.default_cookbook_combo)
+        form.addRow("Workbench:", self.default_workbench_combo)
+        self.default_cookbook_combo.currentIndexChanged.connect(self._defaults_changed)
+        self.default_workbench_combo.currentIndexChanged.connect(
             self._defaults_changed
         )
         layout.addWidget(defaults)
@@ -245,7 +261,7 @@ class SettingsDialog(QDialog):
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels([
             "Name", "Directory", "Upstream", "Git",
-            "Recipe", "Workbench", "In PATH",
+            "Cookbook", "Workbench", "In PATH",
         ])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -311,7 +327,7 @@ class SettingsDialog(QDialog):
                 self.table.setItem(row, column, item)
 
             for column, checked in (
-                (self.RECIPE, entry.use_as_recipe),
+                (self.COOKBOOK, entry.use_as_cookbook),
                 (self.WORKBENCH, entry.use_as_workbench),
                 (self.PATH, entry.is_in_path),
             ):
@@ -328,9 +344,9 @@ class SettingsDialog(QDialog):
 
     def _refresh_defaults(self):
         for combo, role, attribute in (
-            (self.recipe_combo, "use_as_recipe",
-             "default_recipe_location_id"),
-            (self.workbench_combo, "use_as_workbench",
+            (self.default_cookbook_combo, "use_as_cookbook",
+             "default_cookbook_location_id"),
+            (self.default_workbench_combo, "use_as_workbench",
              "default_workbench_location_id"),
         ):
             selected_id = getattr(self.config, attribute)
@@ -351,18 +367,18 @@ class SettingsDialog(QDialog):
             combo.blockSignals(False)
 
     def _defaults_changed(self, *_):
-        self.config.default_recipe_location_id = (
-            self.recipe_combo.currentData()
+        self.config.default_cookbook_location_id = (
+            self.default_cookbook_combo.currentData()
         )
         self.config.default_workbench_location_id = (
-            self.workbench_combo.currentData()
+            self.default_workbench_combo.currentData()
         )
 
     def _role_changed(self, item):
         entry = self.entries[item.row()]
         checked = item.checkState() == Qt.Checked
-        if item.column() == self.RECIPE:
-            entry.use_as_recipe = checked
+        if item.column() == self.COOKBOOK:
+            entry.use_as_cookbook = checked
         elif item.column() == self.WORKBENCH:
             entry.use_as_workbench = checked
         elif item.column() == self.PATH:
@@ -416,14 +432,14 @@ class SettingsDialog(QDialog):
             )
             menu.addSeparator()
 
-        if entry.use_as_recipe:
-            action = menu.addAction("Set as Default Recipe")
+        if entry.use_as_cookbook:
+            action = menu.addAction("Set as Default Cookbook")
             action.setEnabled(
-                self.config.default_recipe_location_id != location.id
+                self.config.default_cookbook_location_id != location.id
             )
             action.triggered.connect(
                 lambda _checked=False, location_id=location.id:
-                    self._set_default_recipe(location_id)
+                    self._set_default_cookbook(location_id)
             )
 
         if entry.use_as_workbench:
@@ -439,8 +455,8 @@ class SettingsDialog(QDialog):
         if menu.actions():
             menu.exec(self.table.viewport().mapToGlobal(position))
 
-    def _set_default_recipe(self, location_id: int):
-        self.config.default_recipe_location_id = location_id
+    def _set_default_cookbook(self, location_id: int):
+        self.config.default_cookbook_location_id = location_id
         self._refresh_defaults()
 
     def _set_default_workbench(self, location_id: int):
@@ -489,10 +505,7 @@ class SettingsDialog(QDialog):
 
     def _setup_defaults(self):
         # First-install setup only; never replaces existing defaults.
-        if (
-            self.config.default_recipe_location_id is not None
-            or self.config.default_workbench_location_id is not None
-        ):
+        if (self.config.default_cookbook_location_id is not None or self.config.default_workbench_location_id is not None):
             QMessageBox.warning(
                 self, "Defaults already selected",
                 "Default setup is for an unconfigured installation.",
@@ -500,10 +513,10 @@ class SettingsDialog(QDialog):
             return
 
         root = Path(self.db.db_path).expanduser().resolve().parent
-        recipe = root / "laupy-pipelines"
-        workbench = root / "workbench"
+        default_cookbook_path = root / DEFAULT_COOKBOOK_DIRNAME
+        default_workbench_path = root / "workbench"
 
-        if os.path.lexists(recipe) or os.path.lexists(workbench):
+        if os.path.lexists(default_cookbook_path) or os.path.lexists(default_workbench_path):
             QMessageBox.warning(
                 self, "Destinations exist",
                 "Register the existing directories with Add instead. "
@@ -515,8 +528,8 @@ class SettingsDialog(QDialog):
         message.setWindowTitle("Set up default folders?")
         message.setTextFormat(Qt.PlainText)
         message.setText(
-            f"Clone:\n{DEFAULT_UPSTREAM}\ninto:\n{recipe}\n\n"
-            f"Initialize an empty Git workbench:\n{workbench}\n\n"
+            f"Clone:\n{DEFAULT_COOKBOOK_UPSTREAM}\ninto:\n{default_cookbook_path}\n\n"
+            f"Initialize an empty Git in defalut worbench:\n{default_workbench_path}\n\n"
             "Directories are created immediately. Database registration "
             "is staged until Save; Cancel will not delete the directories."
         )
@@ -528,27 +541,31 @@ class SettingsDialog(QDialog):
         self._busy = True
         self.content.setEnabled(False)
         self.buttons.setEnabled(False)
-        self._setup_thread = DefaultSetupThread(root, self)
+        # Initialize the default_workbench_path directory immediately, so that the user can
+        Repo.init(default_workbench_path).close() 
+        # Clone DEFAULT_COOKBOOK_UPSTREAM in a separate thread to avoid blocking the GUI.
+        self._setup_thread = GitCloneThread(DEFAULT_COOKBOOK_UPSTREAM, default_cookbook_path, self)
         self._setup_thread.completed.connect(self._defaults_created)
         self._setup_thread.failed.connect(self._setup_failed)
         self._setup_thread.finished.connect(self._setup_finished)
         self._setup_thread.start()
+        
 
     def _defaults_created(self):
         root = Path(self.db.db_path).expanduser().resolve().parent
-        recipe, _ = inspect_git(self._new_location(
-            "Default recipes",
-            str(root / "laupy-pipelines"),
-            DEFAULT_UPSTREAM,
+        cookbook_pipelines, _ = inspect_git(self._new_location(
+            DEFAULT_COOKBOOK_NAME,
+            str(root / DEFAULT_COOKBOOK_DIRNAME),
+            DEFAULT_COOKBOOK_UPSTREAM,
         ))
         workbench, _ = inspect_git(self._new_location(
             "Private workbench", str(root / "workbench")
         ))
         self.entries.extend([
-            FolderEntry(recipe, use_as_recipe=True),
+            FolderEntry(cookbook_pipelines, use_as_cookbook=True),
             FolderEntry(workbench, use_as_workbench=True),
         ])
-        self.config = LautoolsConfig(recipe.id, workbench.id)
+        self.config = LautoolsConfig(cookbook_pipelines.id, workbench.id)
         self._render()
 
     def _setup_failed(self, description):
@@ -575,8 +592,10 @@ class SettingsDialog(QDialog):
                 self.original_ids - current_ids,
             )
         except Exception as exc:
+            msg = f"Failed to save settings: {exc}"
+            log.exception(msg)
             message = QMessageBox(self)
-            message.setWindowTitle("Settings not saved")
+            message.setWindowTitle(msg)
             message.setTextFormat(Qt.PlainText)
             message.setText(str(exc))
             message.exec()

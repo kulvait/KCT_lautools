@@ -23,16 +23,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from lautools.browser.settings_store import load_settings
-from lautools.project_creator import (
-    INFO_FILENAME,
-    RESERVED_BEAMTIME_NAMES,
-    create_project_from_recipe,
-    validate_recipe_copy,
-)
+from lautools.collection_manager import CollectionManager
+from lautools.project_creator import create_project
 
 
 log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+if not log.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
+        datefmt="%d.%m.%Y %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+log.propagate = False
 
 
 def _slug(value: str) -> str:
@@ -91,13 +97,21 @@ class _CreationThread(QThread):
 
     def run(self):
         try:
-            # Repeat preflight in case the recipe changed after confirmation.
-            _validate_recipe_entries(self.arguments["recipe"])
-            self.result = create_project_from_recipe(**self.arguments)
+            cloned = self.parent().collection_manager.clone_recipe_instance(
+                source_instance=self.arguments["recipe_instance"],
+                destination_collection=self.parent()._workbench_collection_id,
+                new_name=self.arguments["clone_name"],
+            )
+            content_path = self.parent().collection_manager.get_recipe_instance_path(cloned)
+            project = create_project(
+                beamtime=self.arguments["beamtime"],
+                project_dir=self.arguments["project_dir"],
+                content_directory=content_path,
+            )
+            self.result = (project, content_path)
         except Exception as exc:
             log.exception("Recipe project creation failed")
             self.error = str(exc)
-
 
 class NewProjectFromRecipeDialog(QDialog):
     """Choose a recipe and destinations; delegate creation to the Python API."""
@@ -215,60 +229,46 @@ class NewProjectFromRecipeDialog(QDialog):
             )
             self.project_edit.setText(str(self._scratch / basename))
 
-            entries, config = load_settings(project_manager.db)
-            by_id = {entry.location.id: entry for entry in entries}
+            self.collection_manager = CollectionManager(project_manager.db)
+            config = project_manager.db.get_config()
+            if config.default_cookbook_location_id is None:
+                raise ValueError(
+                    "Configure a default cookbook collection in Settings."
+                )
+            if config.default_workbench_location_id is None:
+                raise ValueError(
+                    "Configure a default workbench collection in Settings."
+                )
 
-            def default_directory(location_id, role, title):
-                entry = by_id.get(location_id)
-                if (
-                    entry is None
-                    or not getattr(entry, role)
-                    or not entry.location.disk_location
-                ):
-                    raise ValueError(
-                        f"Configure a default {title} directory in Settings."
-                    )
-
-                directory = Path(
-                    entry.location.disk_location
-                ).expanduser().resolve(strict=True)
-
-                if not directory.is_dir():
-                    raise ValueError(f"Not a directory:\n{directory}")
-                return directory
-
-            self._recipes_root = default_directory(
-                config.default_recipe_location_id,
-                "use_as_recipe",
-                "recipe",
+            cookbook_location = project_manager.db.get_location(
+                config.default_cookbook_location_id
             )
-            self._workbench = default_directory(
+            workbench_location = project_manager.db.get_location(
                 config.default_workbench_location_id,
-                "use_as_workbench",
-                "workbench",
             )
+            if cookbook_location is None or cookbook_location.disk_location is None:
+                raise ValueError("Default cookbook collection has no disk location.")
+            if workbench_location is None or workbench_location.disk_location is None:
+                raise ValueError("Default workbench collection has no disk location.")
+
+            self._recipes_root = cookbook_location.disk_location
+            self._workbench = workbench_location.disk_location
+            self._cookbook_collection_id = config.default_cookbook_location_id
+            self._workbench_collection_id = config.default_workbench_location_id
 
             self.recipes_label.setText(str(self._recipes_root))
             self.workbench_label.setText(str(self._workbench))
 
-            recipes = sorted(
-                (
-                    path
-                    for path in self._recipes_root.iterdir()
-                    if not path.name.startswith(".")
-                    and not path.is_symlink()
-                    and path.is_dir()
-                ),
-                key=lambda path: path.name.casefold(),
+            recipe_instances = self.collection_manager.sync_recipe_instances_from_disk(
+                self._cookbook_collection_id
             )
 
-            for recipe in recipes:
-                self.recipe_combo.addItem(recipe.name, recipe)
+            for recipe_instance in recipe_instances:
+                self.recipe_combo.addItem(recipe_instance.name, recipe_instance)
 
-            if not recipes:
+            if not recipe_instances:
                 raise ValueError(
-                    "No recipe subfolders found in the default "
-                    "recipes directory."
+                    "No recipe instances found in the default cookbook collection."
                 )
 
             self._update_name()
@@ -326,11 +326,11 @@ class NewProjectFromRecipeDialog(QDialog):
         message.exec()
 
     def _create(self):
-        recipe = self.recipe_combo.currentData()
+        recipe_instance = self.recipe_combo.currentData()
         project_text = self.project_edit.text().strip()
 
         if (
-            recipe is None
+            recipe_instance is None
             or not project_text
             or self._recipes_root is None
             or self._workbench is None
@@ -345,21 +345,17 @@ class NewProjectFromRecipeDialog(QDialog):
         if not project.is_absolute():
             project = self._scratch / project
 
-        arguments = {
-            "beamtime": self._beamtime,
-            "recipes_root": self._recipes_root,
-            "recipe": recipe,
-            "workbench": self._workbench,
-            "project_dir": project,
-            "copy_name": self.copy_name_edit.text(),
-        }
+        clone_name = self.copy_name_edit.text().strip()
 
         try:
-            recipe, destination, project = validate_recipe_copy(
-                **arguments
+            source_path = self.collection_manager.get_recipe_instance_path(
+                recipe_instance
             )
-            _validate_recipe_entries(recipe)
-
+            destination = self._workbench / clone_name
+            if os.path.lexists(destination):
+                raise ValueError(
+                    f"Workbench recipe instance already exists:\n{destination}"
+                )
             # Use actual filesystem state for the confirmation preview.
             core = Path(self._beamtime.core_path)
             storage_preview = "\n".join(
@@ -381,7 +377,7 @@ class NewProjectFromRecipeDialog(QDialog):
         confirmation.setWindowTitle("Create project?")
         confirmation.setTextFormat(Qt.PlainText)
         confirmation.setText(
-            f"Copy recipe:\n{recipe}\n\n"
+            f"Clone recipe instance:\n{source_path}\n\n"
             f"Into workbench:\n{destination}\n\n"
             f"Create project:\n{project}\n\n"
             f"Beamtime storage links:\n{storage_preview}\n\n"
@@ -402,7 +398,15 @@ class NewProjectFromRecipeDialog(QDialog):
             "Copying recipe, writing INFO and creating project links…"
         )
 
-        self._worker = _CreationThread(arguments, self)
+        self._worker = _CreationThread(
+            {
+                "beamtime": self._beamtime,
+                "project_dir": project,
+                "recipe_instance": recipe_instance,
+                "clone_name": clone_name,
+            },
+            self,
+        )
         self._worker.finished.connect(self._creation_finished)
         self._worker.start()
 
