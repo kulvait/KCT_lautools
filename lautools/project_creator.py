@@ -135,14 +135,14 @@ def validate_recipe_copy(
     return recipe, destination, project_dir
 
 
-def _validate_content_directory(content_directory: Path) -> Path:
-    content_directory = Path(content_directory).resolve(strict=True)
-    if not content_directory.is_dir():
-        raise ValueError(f"Not a content directory: {content_directory}")
+def _validate_recipe_instance_directory(recipe_instance_directory: Path) -> Path:
+    recipe_instance_directory = Path(recipe_instance_directory).resolve(strict=True)
+    if not recipe_instance_directory.is_dir():
+        raise ValueError(f"Not a content directory: {recipe_instance_directory}")
 
     reserved = sorted(
         entry.name
-        for entry in content_directory.iterdir()
+        for entry in recipe_instance_directory.iterdir()
         if entry.name in RESERVED_BEAMTIME_NAMES
     )
     if reserved:
@@ -151,13 +151,13 @@ def _validate_content_directory(content_directory: Path) -> Path:
             + ", ".join(reserved)
         )
 
-    return content_directory
+    return recipe_instance_directory
 
 
 def _beamtime_summary_text(
     beamtime,
     project_dir: Path,
-    content_directory: Path | None,
+    recipe_instance_directory: Path | None,
 ) -> str:
     core_path = Path(beamtime.core_path).expanduser().resolve(strict=True)
     created_at = datetime.now().replace(microsecond=0).isoformat(sep=" ")
@@ -205,63 +205,62 @@ def _beamtime_summary_text(
             "Beamtime description:",
             description,
         ])
-    if content_directory is not None:
-        lines.append(f"Workbench content dir: {content_directory}")
+    if recipe_instance_directory is not None:
+        lines.append(f"Workbench content dir: {recipe_instance_directory}")
     if sample_count is not None:
         lines.append(f"Number of samples: {sample_count}")
 
-    lines.extend([
-        "",
-        "-------------------",
-        "Original INFO content follows:",
-        "-------------------",
-    ])
     return "\n".join(lines) + "\n"
 
 
 def _write_info_file(
     beamtime,
     project_dir: Path,
-    content_directory: Path | None,
+    recipe_instance_directory: Path | None,
 ) -> None:
-    summary = _beamtime_summary_text(
+    project_summary = _beamtime_summary_text(
         beamtime=beamtime,
         project_dir=project_dir,
-        content_directory=content_directory,
+        recipe_instance_directory=recipe_instance_directory,
     )
-
-    if content_directory is None:
-        (project_dir / INFO_FILENAME).write_text(summary, encoding="utf-8")
+    if recipe_instance_directory is None:
+        (project_dir / INFO_FILENAME).write_text(project_summary, encoding="utf-8")
         return
-
-    info_path = content_directory / INFO_FILENAME
-    original = ""
+    info_path = recipe_instance_directory / INFO_FILENAME
+    recipe_info_content = ""
+    info_parts_separator = [
+        "",
+        "-------------------",
+        "Original INFO content follows:",
+        "-------------------",
+    ]
     if info_path.exists():
         if not info_path.is_file():
             raise ValueError(f"INFO exists but is not a regular file: {info_path}")
-        original = info_path.read_text(encoding="utf-8")
+        recipe_info_content = info_path.read_text(encoding="utf-8")
+        recipe_info_content = "\n".join(info_parts_separator) + "\n" + recipe_info_content
 
-    info_path.write_text(summary + original, encoding="utf-8")
+    info_path.write_text(project_summary + recipe_info_content, encoding="utf-8")
 
 
 def create_project(
     beamtime,
     project_dir: Path,
-    content_directory: Path | None = None,
+    recipe_instance_directory: Path | None = None,
 ) -> Path:
     """
     Create a project directory with beamtime links and optional workbench links.
 
     - Always creates links to existing beamtime top-level dirs:
       raw, processed, scratch_cc, shared
-    - Optionally links top-level entries from content_directory
-    - Creates or updates INFO in content_directory, or creates INFO in project_dir
-      when no content_directory is provided
+    - Optionally links top-level entries from recipe_instance_directory
+    - Creates or updates INFO in recipe_instance_directory, or creates INFO in project_dir
+      when no recipe_instance_directory is provided
     """
     project_dir = _validate_project_dir(beamtime, project_dir)
     content = None
-    if content_directory is not None:
-        content = _validate_content_directory(content_directory)
+    if recipe_instance_directory is not None:
+        content = _validate_recipe_instance_directory(recipe_instance_directory)
 
     beamtime_targets = _existing_beamtime_targets(beamtime)
 
@@ -295,7 +294,7 @@ def create_project(
         _write_info_file(
             beamtime=beamtime,
             project_dir=project_dir,
-            content_directory=content,
+            recipe_instance_directory=content,
         )
 
         if content is None:
@@ -383,7 +382,7 @@ def create_project_from_recipe(
         project_dir = create_project(
             beamtime=beamtime,
             project_dir=project_dir,
-            content_directory=destination,
+            recipe_instance_directory=destination,
         )
         return project_dir, destination
 

@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS lautools_location (
     )
 );
 
+-- Legacy table to be replaced by laupy_recipe_collections
 CREATE TABLE IF NOT EXISTS lautools_pipelines (
     location_id INTEGER PRIMARY KEY
         REFERENCES lautools_location(id) ON DELETE CASCADE,
@@ -219,19 +220,69 @@ CREATE TABLE IF NOT EXISTS lautools_pipelines (
     CHECK (use_as_recipe = 1 OR use_as_workbench = 1)
 );
 
+
+CREATE TABLE IF NOT EXISTS laupy_recipe_collections (
+    location_id INTEGER PRIMARY KEY
+        REFERENCES lautools_location(id) ON DELETE CASCADE,
+
+    use_as_cookbook INTEGER NOT NULL DEFAULT 0
+        CHECK (use_as_template_source IN (0, 1)),
+    use_as_workbench INTEGER NOT NULL DEFAULT 0
+        CHECK (use_as_workbench IN (0, 1)),
+
+    CHECK (use_as_cookbook = 1 OR use_as_workbench = 1)
+);
+
+-- Individual folders inside a recipe collection, each containing a recipe instance.
+CREATE TABLE IF NOT EXISTS laupy_recipe_instances (
+    id INTEGER PRIMARY KEY,
+    collection_location_id INTEGER NOT NULL
+        REFERENCES laupy_recipe_collections(location_id) ON DELETE CASCADE,
+    cloned_from_instance_id INTEGER REFERENCES laupy_recipe_instances(id) ON DELETE SET NULL,
+
+    name TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    source_instance_id INTEGER
+        REFERENCES laupy_recipe_instances(id) ON DELETE SET NULL,
+
+    created_at TEXT NOT NULL,
+    last_inspected TEXT,
+
+    position INTEGER NOT NULL DEFAULT 0, -- for ordering in the GUI
+    UNIQUE(collection_location_id, relative_path)
+);
+
+-- Collection of locations which shall be added to PATH
 CREATE TABLE IF NOT EXISTS lautools_paths (
     location_id INTEGER PRIMARY KEY
         REFERENCES lautools_location(id) ON DELETE CASCADE,
     position INTEGER NOT NULL DEFAULT 0
 );
 
+-- Default cookbook and default workbench for new project creation.
 CREATE TABLE IF NOT EXISTS lautools_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),
 
-    default_recipe_location_id INTEGER
-        REFERENCES lautools_pipelines(location_id) ON DELETE SET NULL,
+    default_cookbook_location_id INTEGER
+        REFERENCES laupy_recipe_collections(location_id) ON DELETE SET NULL,
     default_workbench_location_id INTEGER
-        REFERENCES lautools_pipelines(location_id) ON DELETE SET NULL,
+        REFERENCES laupy_recipe_collections(location_id) ON DELETE SET NULL,
 
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS laupy_project_to_recipe_instance (
+    id INTEGER PRIMARY KEY,
+
+    project_id INTEGER NOT NULL
+        REFERENCES laupy_project(id) ON DELETE CASCADE,
+    recipe_instance_id INTEGER NOT NULL
+        REFERENCES laupy_recipe_instances(id) ON DELETE CASCADE,
+
+    created_at TEXT,
+
+    -- Initial implementation: one recipe-backed workbench per project.
+    UNIQUE (project_id),
+
+    UNIQUE (recipe_instance_id)
 );
