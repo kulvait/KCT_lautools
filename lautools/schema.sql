@@ -225,16 +225,13 @@ CREATE TABLE IF NOT EXISTS laupy_recipe_instances (
     id INTEGER PRIMARY KEY,
     collection_location_id INTEGER NOT NULL
         REFERENCES laupy_recipe_collections(location_id) ON DELETE CASCADE,
-    cloned_from_instance_id INTEGER REFERENCES laupy_recipe_instances(id) ON DELETE SET NULL,
-
     name TEXT NOT NULL,
     relative_path TEXT NOT NULL,
-    source_instance_id INTEGER
-        REFERENCES laupy_recipe_instances(id) ON DELETE SET NULL,
 
+    cloned_from_instance_id INTEGER REFERENCES laupy_recipe_instances(id) ON DELETE SET NULL,
+    source_instance_id INTEGER REFERENCES laupy_recipe_instances(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL,
     last_inspected TEXT,
-
     position INTEGER NOT NULL DEFAULT 0, -- for ordering in the GUI
     UNIQUE(collection_location_id, relative_path)
 );

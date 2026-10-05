@@ -174,13 +174,11 @@ class LautoolsLocation:
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
-
 @dataclass
 class LaupyRecipeCollection:
     location_id: int
     use_as_cookbook: bool = False
     use_as_workbench: bool = False
-
 
 @dataclass
 class LaupyRecipeInstance:
@@ -188,10 +186,11 @@ class LaupyRecipeInstance:
     collection_location_id: int
     name: str
     relative_path: Path
+    cloned_from_instance_id: int | None = None
     source_instance_id: int | None = None
     created_at: datetime | None = None
-    cloned_at: datetime | None = None
     last_inspected: datetime | None = None
+    position: int = 0
 
 
 @dataclass
@@ -387,10 +386,11 @@ class LaupyDB:
             collection_location_id=row["collection_location_id"],
             name=row["name"],
             relative_path=Path(row["relative_path"]),
+            cloned_from_instance_id=row["cloned_from_instance_id"],
             source_instance_id=row["source_instance_id"],
             created_at=_parse_dt(row["created_at"]),
-            cloned_at=_parse_dt(row["cloned_at"]),
             last_inspected=_parse_dt(row["last_inspected"]),
+            position=row["position"]
         )
 
     def _row_to_path_entry(self, row) -> LautoolsPath:
@@ -1016,7 +1016,7 @@ class LaupyDB:
             """
             SELECT * FROM laupy_recipe_instances
             WHERE collection_location_id = ?
-            ORDER BY name COLLATE NOCASE, id
+            ORDER BY position, name COLLATE NOCASE, id
             """,
             (collection_location_id,),
         ).fetchall()
@@ -1040,24 +1040,25 @@ class LaupyDB:
             """
             INSERT INTO laupy_recipe_instances (
                 collection_location_id, name, relative_path,
-                source_instance_id, created_at, cloned_at, last_inspected
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                cloned_from_instance_id, source_instance_id, created_at, last_inspected, position
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 recipe_instance.collection_location_id,
                 recipe_instance.name,
                 str(recipe_instance.relative_path),
+                recipe_instance.cloned_from_instance_id,
                 recipe_instance.source_instance_id,
                 _iso(recipe_instance.created_at or _now()),
-                _iso(recipe_instance.cloned_at),
                 _iso(recipe_instance.last_inspected),
-            ),
+                recipe_instance.position,
+            )
         )
         row = self.connection.execute(
             "SELECT * FROM laupy_recipe_instances ORDER BY id DESC LIMIT 1"
         ).fetchone()
         return self._row_to_recipe_instance(row)
-
+   
     def update_recipe_instance(
         self,
         recipe_instance: LaupyRecipeInstance,
@@ -1067,17 +1068,25 @@ class LaupyDB:
         self.connection.execute(
             """
             UPDATE laupy_recipe_instances
-            SET collection_location_id = ?, name = ?, relative_path = ?,
-                source_instance_id = ?, cloned_at = ?, last_inspected = ?
+            SET collection_location_id = ?,
+                name = ?,
+                relative_path = ?,
+                cloned_from_instance_id = ?,
+                source_instance_id = ?,
+                created_at = ?,
+                last_inspected = ?,
+                position = ?
             WHERE id = ?
             """,
             (
                 recipe_instance.collection_location_id,
                 recipe_instance.name,
                 str(recipe_instance.relative_path),
+                recipe_instance.cloned_from_instance_id,
                 recipe_instance.source_instance_id,
-                _iso(recipe_instance.cloned_at),
+                _iso(recipe_instance.created_at),
                 _iso(recipe_instance.last_inspected),
+                recipe_instance.position,
                 recipe_instance.id,
             ),
         )
