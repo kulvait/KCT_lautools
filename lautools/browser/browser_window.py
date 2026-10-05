@@ -1431,7 +1431,7 @@ class BrowserWindow(QMainWindow):
             beamtime.id
             for beamtime in current_beamtimes
         }
-        current_id = next(
+        current_beamtime_id = next(
             (
                 beamtime.id
                 for beamtime in beamtimes
@@ -1452,21 +1452,12 @@ class BrowserWindow(QMainWindow):
             action_group.setExclusive(True)
 
             for beamtime in beamtimes:
-                submenu = self.beamtime_menu.addMenu(
-                    self._beamtime_label(beamtime)
-                )
-
+                submenu = self.beamtime_menu.addMenu(self._beamtime_label(beamtime)) #Name submenu after the beamtime label
                 menu_action = submenu.menuAction()
                 menu_action.setCheckable(True)
-                menu_action.setChecked(
-                    beamtime.id == current_id
-                )
+                menu_action.setChecked(beamtime.id == current_beamtime_id)
                 action_group.addAction(menu_action)
-
-                tooltip = (
-                    beamtime.title
-                    or str(beamtime.core_path or "")
-                )
+                tooltip = (beamtime.title or str(beamtime.core_path or "").strip())
                 menu_action.setToolTip(tooltip)
                 submenu.setToolTipsVisible(True)
 
@@ -1482,7 +1473,6 @@ class BrowserWindow(QMainWindow):
 
     def _beamtime_project_entries(self, beamtime) -> list[tuple[str, Path]]:
         """Linked projects plus scratch_cc folders containing "kct".
-
         Returns (label, path) pairs, deduplicated by path.
         """
         entries: dict[str, tuple[str, Path]] = {}
@@ -1504,8 +1494,8 @@ class BrowserWindow(QMainWindow):
                 folders = []  # scratch_cc missing or unreadable
 
             for folder in folders:
-                entries.setdefault(str(folder), (folder.name, folder))
-
+                if str(folder) not in entries:
+                    entries.setdefault(str(folder), (folder.name, folder))
         return sorted(entries.values(), key=lambda e: e[0].casefold())
 
     def _populate_beamtime_submenu(self, menu: QMenu, beamtime) -> None:
