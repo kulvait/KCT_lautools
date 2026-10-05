@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from lautools.collection_manager import CollectionManager
 from lautools.project_creator import create_project
 
+RESERVED_BEAMTIME_NAMES = ("raw", "processed", "scratch_cc", "shared")
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -97,18 +98,18 @@ class _CreationThread(QThread):
 
     def run(self):
         try:
-            cloned = self.parent().collection_manager.clone_recipe_instance(
+            clonedRecipeInstance = self.parent().collection_manager.clone_recipe_instance(
                 source_instance=self.arguments["recipe_instance"],
                 destination_collection=self.parent()._workbench_collection_id,
-                new_name=self.arguments["clone_name"],
+                new_name=self.arguments["cloned_recipe_name"],
             )
-            content_path = self.parent().collection_manager.get_recipe_instance_path(cloned)
+            cloned_recipe_path = self.parent().collection_manager.get_recipe_instance_path(clonedRecipeInstance)
             project = create_project(
                 beamtime=self.arguments["beamtime"],
                 project_dir=self.arguments["project_dir"],
-                content_directory=content_path,
+                recipe_instance_directory=cloned_recipe_path,
             )
-            self.result = (project, content_path)
+            self.result = (project, cloned_recipe_path)
         except Exception as exc:
             log.exception("Recipe project creation failed")
             self.error = str(exc)
@@ -133,7 +134,7 @@ class NewProjectFromRecipeDialog(QDialog):
 
         # Retained for compatibility with BrowserWindow's constructor call.
         # size_service is not needed for project creation.
-        self._recipes_root: Path | None = None
+        self._cookbook_root: Path | None = None
         self._workbench: Path | None = None
         self._project_path: Path | None = None
         self._workbench_copy: Path | None = None
@@ -141,9 +142,7 @@ class NewProjectFromRecipeDialog(QDialog):
         self._busy = False
         self._automatic_copy_name = True
 
-        self.setWindowTitle(
-            f"New project from recipe — {beamtime.beamtime_id}"
-        )
+        self.setWindowTitle(f"New project from recipe for beamtime {beamtime.beamtime_id}")
         self.resize(800, 450)
 
         outer = QVBoxLayout(self)
@@ -154,9 +153,9 @@ class NewProjectFromRecipeDialog(QDialog):
         self.recipe_combo = QComboBox()
         layout.addRow("Recipe:", self.recipe_combo)
 
-        self.recipes_label = self._path_label()
+        self.cookbook_label = self._path_label()
         self.workbench_label = self._path_label()
-        layout.addRow("Recipes directory:", self.recipes_label)
+        layout.addRow("Cookbook:", self.cookbook_label)
         layout.addRow("Workbench:", self.workbench_label)
 
         self.project_edit = QLineEdit()
@@ -251,12 +250,12 @@ class NewProjectFromRecipeDialog(QDialog):
             if workbench_location is None or workbench_location.disk_location is None:
                 raise ValueError("Default workbench collection has no disk location.")
 
-            self._recipes_root = cookbook_location.disk_location
+            self._cookbook_root = cookbook_location.disk_location
             self._workbench = workbench_location.disk_location
             self._cookbook_collection_id = config.default_cookbook_location_id
             self._workbench_collection_id = config.default_workbench_location_id
 
-            self.recipes_label.setText(str(self._recipes_root))
+            self.cookbook_label.setText(str(self._cookbook_root))
             self.workbench_label.setText(str(self._workbench))
 
             recipe_instances = self.collection_manager.sync_recipe_instances_from_disk(
@@ -332,9 +331,10 @@ class NewProjectFromRecipeDialog(QDialog):
         if (
             recipe_instance is None
             or not project_text
-            or self._recipes_root is None
+            or self._cookbook_root is None
             or self._workbench is None
         ):
+            log.error("Missing recipe or project directory: %s, %s", recipe_instance, project_text)
             self._message(
                 "Selection required",
                 "Choose a recipe and project directory.",
@@ -365,11 +365,8 @@ class NewProjectFromRecipeDialog(QDialog):
                 for name in RESERVED_BEAMTIME_NAMES
             )
 
-            # Pass canonical paths to the worker.
-            arguments["recipe"] = recipe
-            arguments["project_dir"] = project
-
         except Exception as exc:
+            log.exception("Preflight checks failed with exception {%s}", exc)
             self._message("Cannot create project", str(exc))
             return
 
@@ -403,7 +400,7 @@ class NewProjectFromRecipeDialog(QDialog):
                 "beamtime": self._beamtime,
                 "project_dir": project,
                 "recipe_instance": recipe_instance,
-                "clone_name": clone_name,
+                "cloned_recipe_name": clone_name,
             },
             self,
         )
@@ -417,11 +414,9 @@ class NewProjectFromRecipeDialog(QDialog):
         self.buttons.setEnabled(True)
 
         if worker.result is None:
+            log.error("Project creation failed: %s", worker.error)
             self.status.setText("Project creation failed.")
-            self._message(
-                "Project creation failed",
-                worker.error or "Unknown error.",
-            )
+            self._message("Project creation failed", worker.error or "Unknown error.",)
         else:
             self._project_path, self._workbench_copy = worker.result
             super().accept()

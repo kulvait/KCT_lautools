@@ -229,7 +229,6 @@ CREATE TABLE IF NOT EXISTS laupy_recipe_instances (
     relative_path TEXT NOT NULL,
 
     cloned_from_instance_id INTEGER REFERENCES laupy_recipe_instances(id) ON DELETE SET NULL,
-    source_instance_id INTEGER REFERENCES laupy_recipe_instances(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL,
     last_inspected TEXT,
     position INTEGER NOT NULL DEFAULT 0, -- for ordering in the GUI

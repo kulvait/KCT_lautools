@@ -12,13 +12,24 @@ from lautools.browser.project_config_dialog import (
     format_flag,
     format_time,
 )
+from lautools.db import (LaupyRecipeCollection, LaupyRecipeInstance)
 
-
-log = logging.getLogger(__name__)
 
 RESERVED_BEAMTIME_NAMES = ("raw", "processed", "scratch_cc", "shared")
 INFO_FILENAME = "INFO"
 
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+if not log.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
+        datefmt="%d.%m.%Y %H:%M:%S",
+    )   
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+log.propagate = False
 
 def _directory_name(value: str) -> str:
     name = value.strip()
@@ -346,52 +357,4 @@ def create_project(
         details = str(exc)
         if cleanup_errors:
             details += "\n\nCleanup warnings:\n" + "\n".join(cleanup_errors)
-        raise RuntimeError(details) from exc
-
-
-def create_project_from_recipe(
-    beamtime,
-    recipes_root: Path,
-    recipe: Path,
-    workbench: Path,
-    project_dir: Path,
-    copy_name: str,
-) -> tuple[Path, Path]:
-    """
-    Copy a recipe into the workbench and create a project linked to that copy.
-    """
-    recipe, destination, project_dir = validate_recipe_copy(
-        beamtime=beamtime,
-        recipes_root=recipes_root,
-        recipe=recipe,
-        workbench=workbench,
-        project_dir=project_dir,
-        copy_name=copy_name,
-    )
-
-    reserved_destination = False
-    try:
-        destination.mkdir()
-        reserved_destination = True
-        shutil.copytree(
-            recipe,
-            destination,
-            dirs_exist_ok=True,
-            symlinks=True,
-        )
-        project_dir = create_project(
-            beamtime=beamtime,
-            project_dir=project_dir,
-            recipe_instance_directory=destination,
-        )
-        return project_dir, destination
-
-    except Exception as exc:
-        details = str(exc)
-        if reserved_destination:
-            details += (
-                "\n\nThe workbench copy was retained, possibly incomplete:"
-                f"\n{destination}\n"
-                "Inspect it before removing it or retrying with another name."
-            )
         raise RuntimeError(details) from exc

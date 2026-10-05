@@ -153,9 +153,8 @@ class CollectionManager:
                 collection_location_id=destination_collection_id,
                 name=destination_relative.name,
                 relative_path=destination_relative,
-                source_instance_id=source.id,
+                cloned_from_instance_id=source.id,
                 created_at=_now(),
-                cloned_at=_now(),
                 last_inspected=_now(),
             )
         )

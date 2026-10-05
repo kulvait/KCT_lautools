@@ -6,8 +6,9 @@ from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
+#Fixing sql connections from different threads
+import threading
 from typing import Any, Iterator
-
 
 def _now() -> datetime:
     return datetime.now().replace(microsecond=0)
@@ -187,17 +188,21 @@ class LaupyRecipeInstance:
     name: str
     relative_path: Path
     cloned_from_instance_id: int | None = None
-    source_instance_id: int | None = None
     created_at: datetime | None = None
     last_inspected: datetime | None = None
     position: int = 0
 
+@dataclass
+class LaupyProjectToRecipeInstance:
+    id: int | None
+    project_id: int
+    recipe_instance_id: int
+    created_at: datetime | None = None
 
 @dataclass
 class LautoolsPath:
     location_id: int
     position: int = 0
-
 
 @dataclass
 class LautoolsConfig:
@@ -210,30 +215,48 @@ class LaupyDB:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        self.connection = sqlite3.connect(self.db_path)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys = ON")
-
+        self._local = threading.local()
+        # Initialize schema using a connection belonging to this thread.
         self._init_schema()
 
-    def close(self) -> None:
-        self.connection.close()
-
-    @contextmanager
-    def transaction(self) -> Iterator[None]:
-        try:
-            yield
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
+    def _create_connection(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self.db_path,
+            timeout=30,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
 
     def _init_schema(self) -> None:
         schema_path = Path(__file__).with_name("schema.sql")
         schema = schema_path.read_text(encoding="utf-8")
         self.connection.executescript(schema)
         self.connection.commit()
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = self._create_connection()
+            self._local.connection = connection
+        return connection
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        connection = self.connection
+        try:
+            yield
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def close(self) -> None:
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            connection.close()
+            del self._local.connection
 
     def _row_to_beamtime(self, row) -> Beamtime:
         return Beamtime(
@@ -387,10 +410,17 @@ class LaupyDB:
             name=row["name"],
             relative_path=Path(row["relative_path"]),
             cloned_from_instance_id=row["cloned_from_instance_id"],
-            source_instance_id=row["source_instance_id"],
             created_at=_parse_dt(row["created_at"]),
             last_inspected=_parse_dt(row["last_inspected"]),
             position=row["position"]
+        )
+
+    def _row_to_project_to_recipe_instance(self, row) -> LaupyProjectToRecipeInstance:
+        return LaupyProjectToRecipeInstance(
+            id=row["id"],
+            project_id=row["project_id"],
+            recipe_instance_id=row["recipe_instance_id"],
+            created_at=_parse_dt(row["created_at"]),
         )
 
     def _row_to_path_entry(self, row) -> LautoolsPath:
@@ -1032,6 +1062,20 @@ class LaupyDB:
         ).fetchone()
         return self._row_to_recipe_instance(row) if row else None
 
+    def get_recipe_instance_by_relative_path(
+        self,
+        collection_location_id: int,
+        relative_path: Path,
+    ) -> LaupyRecipeInstance | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM laupy_recipe_instances
+            WHERE collection_location_id = ? AND relative_path = ?
+            """,
+            (collection_location_id, str(relative_path)),
+        ).fetchone()
+        return self._row_to_recipe_instance(row) if row else None
+
     def add_recipe_instance(
         self,
         recipe_instance: LaupyRecipeInstance,
@@ -1040,15 +1084,14 @@ class LaupyDB:
             """
             INSERT INTO laupy_recipe_instances (
                 collection_location_id, name, relative_path,
-                cloned_from_instance_id, source_instance_id, created_at, last_inspected, position
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                cloned_from_instance_id, created_at, last_inspected, position
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 recipe_instance.collection_location_id,
                 recipe_instance.name,
                 str(recipe_instance.relative_path),
                 recipe_instance.cloned_from_instance_id,
-                recipe_instance.source_instance_id,
                 _iso(recipe_instance.created_at or _now()),
                 _iso(recipe_instance.last_inspected),
                 recipe_instance.position,
@@ -1072,7 +1115,6 @@ class LaupyDB:
                 name = ?,
                 relative_path = ?,
                 cloned_from_instance_id = ?,
-                source_instance_id = ?,
                 created_at = ?,
                 last_inspected = ?,
                 position = ?
@@ -1083,7 +1125,6 @@ class LaupyDB:
                 recipe_instance.name,
                 str(recipe_instance.relative_path),
                 recipe_instance.cloned_from_instance_id,
-                recipe_instance.source_instance_id,
                 _iso(recipe_instance.created_at),
                 _iso(recipe_instance.last_inspected),
                 recipe_instance.position,
@@ -1095,6 +1136,100 @@ class LaupyDB:
             (recipe_instance.id,),
         ).fetchone()
         return self._row_to_recipe_instance(row)
+
+    def add_project_to_recipe_instance(
+        self,
+        link: LaupyProjectToRecipeInstance,
+    ) -> LaupyProjectToRecipeInstance:
+        self.connection.execute(
+            """
+            INSERT INTO laupy_project_to_recipe_instance (
+                project_id, recipe_instance_id, created_at
+            ) VALUES (?, ?, ?)
+            """,
+            (
+                link.project_id,
+                link.recipe_instance_id,
+                _iso(link.created_at or _now()),
+            ),
+        )
+        cursor = self.connection.execute(
+            "SELECT * FROM laupy_project_to_recipe_instance ORDER BY id DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        return self._row_to_project_to_recipe_instance(row)
+    
+    def get_project_to_recipe_instance(
+        self,
+        link_id: int,
+    ) -> LaupyProjectToRecipeInstance | None:
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project_to_recipe_instance WHERE id = ?",
+            (link_id,),
+        ).fetchone()
+        return self._row_to_project_to_recipe_instance(row) if row else None
+    
+    def get_project_to_recipe_instance_for_project(
+        self,
+        project_id: int,
+    ) -> LaupyProjectToRecipeInstance | None:
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project_to_recipe_instance WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return self._row_to_project_to_recipe_instance(row) if row else None
+    
+    def get_project_to_recipe_instance_for_recipe_instance(
+        self,
+        recipe_instance_id: int,
+    ) -> LaupyProjectToRecipeInstance | None:
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project_to_recipe_instance WHERE recipe_instance_id = ?",
+            (recipe_instance_id,),
+        ).fetchone()
+        return self._row_to_project_to_recipe_instance(row) if row else None
+    
+    def list_project_to_recipe_instances(
+        self,
+    ) -> list[LaupyProjectToRecipeInstance]:
+        rows = self.connection.execute(
+            "SELECT * FROM laupy_project_to_recipe_instance ORDER BY id"
+        ).fetchall()
+        return [self._row_to_project_to_recipe_instance(r) for r in rows]
+    
+    def update_project_to_recipe_instance(
+        self,
+        link: LaupyProjectToRecipeInstance,
+    ) -> LaupyProjectToRecipeInstance:
+        if link.id is None:
+            raise ValueError("Link has not been saved")
+        self.connection.execute(
+            """
+            UPDATE laupy_project_to_recipe_instance
+            SET project_id = ?, recipe_instance_id = ?, created_at = ?
+            WHERE id = ?
+            """,
+            (
+                link.project_id,
+                link.recipe_instance_id,
+                _iso(link.created_at),
+                link.id,
+            ),
+        )
+        row = self.connection.execute(
+            "SELECT * FROM laupy_project_to_recipe_instance WHERE id = ?",
+            (link.id,),
+        ).fetchone()
+        return self._row_to_project_to_recipe_instance(row)
+    
+    def remove_project_to_recipe_instance(
+        self,
+        link_id: int,
+    ) -> None:
+        self.connection.execute(
+            "DELETE FROM laupy_project_to_recipe_instance WHERE id = ?",
+            (link_id,),
+        )
 
     def get_config(self) -> LautoolsConfig:
         row = self.connection.execute(

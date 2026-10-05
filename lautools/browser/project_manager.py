@@ -15,7 +15,12 @@ from lautools.db import (
     LaupyDB,
     LaupyProject,
     LaupyProjectWorkspace,
+    LaupyRecipeInstance,
+    LaupyProjectToRecipeInstance,
 )
+
+BEAMTIME_LINK_NAMES = ("raw", "processed", "scratch_cc", "shared")
+
 
 ProgressCallback = Callable[[str], None]
 
@@ -35,12 +40,23 @@ class BeamtimeDetail:
     beamtime: Beamtime
     storage: BeamtimeStorage | None
 
+@dataclass(frozen=True)
+class GPFSLinkInfo:
+    path: Path
+    is_symlink: bool | None
+    target: Path | None = None
+    target_available: bool | None = None
+    matches_beamtime: bool | None = None
+    error: str | None = None
 
 @dataclass
 class ProjectInfo:
     project: LaupyProject
     workspaces: list[LaupyProjectWorkspace] = field(default_factory=list)
     beamtimes: list[BeamtimeDetail] = field(default_factory=list)
+    recipe_link: LaupyProjectToRecipeInstance | None = None
+    recipe_instance: LaupyRecipeInstance | None = None
+    gpfs_links: dict[str, GPFSLinkInfo] = field(default_factory=dict)
 
     @property
     def id(self) -> int | None:
@@ -67,6 +83,17 @@ class ProjectInfo:
         value = self.project.last_inspected
         return value.isoformat(timespec="seconds") if value else None
 
+    @property
+    def has_recipe_instance(self) -> bool:
+        return self.recipe_instance is not None
+
+    @property
+    def has_gpfs_links(self) -> bool:
+        """At least one reserved symlink targets an associated beamtime."""
+        return any(
+            link.is_symlink is True and link.matches_beamtime is True
+            for link in self.gpfs_links.values()
+        )
 
 class BeamtimeManager:
     """Filesystem operations only; persistence belongs to ProjectManager."""
@@ -199,11 +226,14 @@ class ProjectManager:
 
     def get_project_info(self, project: LaupyProject | int) -> ProjectInfo:
         project = self._project(project)
-        workspaces = self.db.list_workspaces_for_project(project.id)
         linked = self.db.list_beamtimes_for_project(project.id)
+        recipe_link = self.db.get_project_to_recipe_instance_for_project(
+            project.id
+        )
+
         return ProjectInfo(
             project=project,
-            workspaces=workspaces,
+            workspaces=self.db.list_workspaces_for_project(project.id),
             beamtimes=[
                 BeamtimeDetail(
                     beamtime=beamtime,
@@ -211,7 +241,74 @@ class ProjectManager:
                 )
                 for beamtime in linked
             ],
+            recipe_link=recipe_link,
+            recipe_instance=(
+                self.db.get_recipe_instance(recipe_link.recipe_instance_id)
+                if recipe_link is not None else None
+            ),
+            gpfs_links=self.inspect_gpfs_links(project, linked),
         )
+
+    def inspect_gpfs_links(
+        self,
+        project: LaupyProject,
+        beamtimes: list[Beamtime],
+    ) -> dict[str, GPFSLinkInfo]:
+        result = {}
+
+        for name in BEAMTIME_LINK_NAMES:
+            link = project.path / name
+            try:
+                # Failure to inspect the project must not mean "links absent".
+                project.path.stat()
+
+                try:
+                    link.lstat()
+                except FileNotFoundError:
+                    result[name] = GPFSLinkInfo(
+                        path=link,
+                        is_symlink=False,
+                    )
+                    continue
+
+                if not link.is_symlink():
+                    result[name] = GPFSLinkInfo(
+                        path=link,
+                        is_symlink=False,
+                    )
+                    continue
+
+                target = Path(os.readlink(link))
+                if not target.is_absolute():
+                    target = link.parent / target
+                target = target.resolve(strict=False)
+
+                expected = {
+                    (beamtime.core_path / name).resolve(strict=False)
+                    for beamtime in beamtimes
+                    if beamtime.core_path is not None
+                }
+
+                try:
+                    target.stat()
+                    available = target.is_dir()
+                except FileNotFoundError:
+                    available = False
+
+                result[name] = GPFSLinkInfo(
+                    path=link,
+                    is_symlink=True,
+                    target=target,
+                    target_available=available,
+                    matches_beamtime=target in expected if expected else None,
+                )
+            except (OSError, RuntimeError) as exc:
+                result[name] = GPFSLinkInfo(
+                    path=link,
+                    is_symlink=None,
+                    error=str(exc),
+                )
+        return result
 
     def register_project(
         self,

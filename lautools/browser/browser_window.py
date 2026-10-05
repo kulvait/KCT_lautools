@@ -671,31 +671,20 @@ class BrowserWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def open_project(self):
-        directory = QFileDialog.getExistingDirectory(
-            self,
-            "Open Project Directory",
-        )
-
+        directory = QFileDialog.getExistingDirectory(self, "Open Project Directory", )
         if not directory:
             return
-
         path = Path(directory).resolve()
-
         if not path.is_dir():
-            self.status_label.setText(
-                f"Not a directory: {path}"
-            )
+            self.status_label.setText(f"Not a directory: {path}")
             return
 
         try:
             project = self.project_manager.register_project(path)
         except Exception as exc:
             log.exception("Cannot register project: %s", path)
-            self.status_label.setText(
-                f"Could not open project: {exc}"
-            )
+            self.status_label.setText(f"Could not open project: {exc}")
             return
-
         self._activate_project(project)
 
     # Compatibility alias for existing signal connections.
