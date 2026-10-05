@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -50,6 +53,8 @@ TERMINAL_EVENTS = {
 }
 
 REFRESH_ORDER = ("processed", "scratch_cc", "raw")
+PROBLEM_BRUSH = QBrush(QColor(255, 200, 200))
+PROJECT_ID_ROLE = Qt.UserRole
 
 
 def _resolve(path: Path) -> Path:
@@ -79,10 +84,14 @@ class BeamtimeInfoDialog(QDialog):
     (
         PROJECT_NAME,
         PROJECT_PATH,
+        PROJECT_EXISTS,
+        PROJECT_RECIPE,
+        PROJECT_RECIPE_PATH,
+        PROJECT_RECIPE_EXISTS,
         PROJECT_SIZE,
         PROJECT_UPDATED,
         PROJECT_STATUS,
-    ) = range(5)
+    ) = range(9)
 
     def __init__(
         self,
@@ -383,47 +392,32 @@ class BeamtimeInfoDialog(QDialog):
         controls.addStretch()
         layout.addLayout(controls)
 
-        self.project_table = QTableWidget(0, 5)
+        # Create the project table with 9 columns for various project attributes.
+        self.project_table = QTableWidget(0, 9)
         self.project_table.setHorizontalHeaderLabels([
             "Project",
             "Path",
+            "Folder exists",
+            "Recipe",
+            "Recipe folder",
+            "Recipe exists",
             "Size",
             "Updated",
             "Status",
         ])
-        self.project_table.setEditTriggers(
-            QAbstractItemView.NoEditTriggers
-        )
-        self.project_table.setSelectionBehavior(
-            QAbstractItemView.SelectRows
-        )
-        self.project_table.setSelectionMode(
-            QAbstractItemView.SingleSelection
-        )
+        self.project_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.project_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.project_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.project_table.verticalHeader().setVisible(False)
-
+        self.project_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.project_table.customContextMenuRequested.connect(
+            self._project_context_menu
+        )
         header = self.project_table.horizontalHeader()
-        header.setSectionResizeMode(
-            self.PROJECT_NAME,
-            QHeaderView.ResizeToContents,
-        )
-        header.setSectionResizeMode(
-            self.PROJECT_PATH,
-            QHeaderView.Stretch,
-        )
-        header.setSectionResizeMode(
-            self.PROJECT_SIZE,
-            QHeaderView.ResizeToContents,
-        )
-        header.setSectionResizeMode(
-            self.PROJECT_UPDATED,
-            QHeaderView.ResizeToContents,
-        )
-        header.setSectionResizeMode(
-            self.PROJECT_STATUS,
-            QHeaderView.ResizeToContents,
-        )
-
+        for column in range(self.project_table.columnCount()):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.PROJECT_PATH, QHeaderView.Stretch)
+        header.setSectionResizeMode(self.PROJECT_RECIPE_PATH, QHeaderView.Stretch)
         self.project_table.setMinimumHeight(220)
         layout.addWidget(self.project_table)
 
@@ -543,22 +537,23 @@ class BeamtimeInfoDialog(QDialog):
     # Project discovery
     # ------------------------------------------------------------------
 
+    def _beamtime_on_gpfs(self) -> bool | None:
+        storage = self.db.get_beamtime_storage(self.beamtime.id)
+        return storage.on_gpfs if storage is not None else None
+
     def _load_projects(self) -> None:
         try:
-            projects = self.db.list_projects_for_beamtime(
-                self.beamtime.id
-            )
+            projects = self.db.list_projects_for_beamtime(self.beamtime.id)
         except Exception as exc:
             self.refresh_status_label.setText(
                 f"Cannot load linked projects: {exc}"
             )
             projects = []
 
-        projects = sorted(
-            projects,
-            key=lambda project: project.name.casefold(),
-        )
+        projects = sorted(projects, key=lambda p: p.name.casefold())
+        on_gpfs = self._beamtime_on_gpfs()
 
+        self.project_table.clearContents()
         self.project_table.setRowCount(len(projects))
         self._project_rows.clear()
 
@@ -566,33 +561,57 @@ class BeamtimeInfoDialog(QDialog):
             path = _resolve(project.path)
             self._project_rows[path] = (project.id, row)
 
-            name_item = QTableWidgetItem(project.name)
-            name_item.setToolTip(str(project.path))
-
-            path_item = QTableWidgetItem(str(project.path))
-            path_item.setToolTip(str(project.path))
-
-            self.project_table.setItem(
-                row,
-                self.PROJECT_NAME,
-                name_item,
-            )
-            self.project_table.setItem(
-                row,
-                self.PROJECT_PATH,
-                path_item,
-            )
-
-            for column in (
-                self.PROJECT_SIZE,
-                self.PROJECT_UPDATED,
-                self.PROJECT_STATUS,
-            ):
-                self.project_table.setItem(
-                    row,
-                    column,
-                    QTableWidgetItem(""),
+            try:
+                health = self.project_manager.get_project_health(
+                    project, beamtime_on_gpfs=on_gpfs
                 )
+            except Exception as exc:
+                health = None
+                self.refresh_status_label.setText(
+                    f"Cannot inspect {project.path}: {exc}"
+                )
+
+            if health is None or not health.has_recipe:
+                recipe_name, recipe_path, recipe_exists = "—", "—", "—"
+            else:
+                recipe_name = (
+                    health.recipe_instance.name
+                    if health.recipe_instance else "?"
+                )
+                recipe_path = (
+                    str(health.recipe_path)
+                    if health.recipe_path else "(no disk location)"
+                )
+                recipe_exists = format_flag(health.recipe_exists)
+
+            values = {
+                self.PROJECT_NAME: project.name,
+                self.PROJECT_PATH: str(project.path),
+                self.PROJECT_EXISTS: format_flag(
+                    health.project_exists if health else None
+                ),
+                self.PROJECT_RECIPE: recipe_name,
+                self.PROJECT_RECIPE_PATH: recipe_path,
+                self.PROJECT_RECIPE_EXISTS: recipe_exists,
+                self.PROJECT_SIZE: "",
+                self.PROJECT_UPDATED: "",
+                self.PROJECT_STATUS: "",
+            }
+            tooltip = (
+                "\n".join(health.problems())
+                if health and health.needs_attention
+                else str(project.path)
+            )
+            for column, text in values.items():
+                item = QTableWidgetItem(text)
+                item.setToolTip(tooltip)
+                if health is not None and health.needs_attention:
+                    item.setBackground(PROBLEM_BRUSH)
+                self.project_table.setItem(row, column, item)
+
+            self.project_table.item(row, self.PROJECT_NAME).setData(
+                PROJECT_ID_ROLE, project.id
+            )
 
         if not projects:
             self.project_table.setRowCount(1)
@@ -642,6 +661,127 @@ class BeamtimeInfoDialog(QDialog):
 
         self._restore_active_state()
         self._update_buttons()
+
+    # ------------------------------------------------------------------
+    # Project context menu
+    # ------------------------------------------------------------------
+
+    def _project_id_at_row(self, row: int) -> int | None:
+        item = self.project_table.item(row, self.PROJECT_NAME)
+        return item.data(PROJECT_ID_ROLE) if item is not None else None
+
+    def _project_context_menu(self, pos) -> None:
+        item = self.project_table.itemAt(pos)
+        if item is None:
+            return
+        project_id = self._project_id_at_row(item.row())
+        if project_id is None:
+            return
+
+        try:
+            health = self.project_manager.get_project_health(
+                project_id, beamtime_on_gpfs=self._beamtime_on_gpfs()
+            )
+        except Exception as exc:
+            self.refresh_status_label.setText(str(exc))
+            return
+
+        busy = self._is_busy(_resolve(health.project.path))
+
+        menu = QMenu(self)
+        remove_entry = menu.addAction("Remove database entry")
+        remove_folder = menu.addAction("Remove project folder…")
+        remove_folder.setEnabled(health.project_exists is True and not busy)
+        remove_recipe = menu.addAction("Remove recipe from workbench…")
+        remove_recipe.setEnabled(health.has_recipe)
+
+        chosen = menu.exec(self.project_table.viewport().mapToGlobal(pos))
+        if chosen is remove_entry:
+            self._remove_project_entry(health)
+        elif chosen is remove_folder:
+            self._remove_project_folder(health)
+        elif chosen is remove_recipe:
+            self._remove_project_recipe(health)
+
+    def _confirm(self, title: str, text: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setTextFormat(Qt.PlainText)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        return box.exec() == QMessageBox.Yes
+
+    def _after_project_change(self, message: str) -> None:
+        self._load_projects()
+        self._reload_sizes()
+        self._restore_active_state()
+        self._update_buttons()
+        self.refresh_status_label.setText(message)
+
+    def _remove_project_entry(self, health) -> None:
+        project = health.project
+        if not self._confirm(
+            "Remove database entry?",
+            f"Remove project '{project.name}' from the database?\n\n"
+            f"{project.path}\n\n"
+            "Workspaces, history and the recipe link records are removed "
+            "as well. Files on disk are not touched.",
+        ):
+            return
+        try:
+            self.project_manager.remove_project_entry(project.id)
+        except Exception as exc:
+            self.refresh_status_label.setText(f"Removal failed: {exc}")
+            return
+        self._after_project_change(f"Removed database entry {project.name}")
+
+    def _remove_project_folder(self, health) -> None:
+        project = health.project
+        if not self._confirm(
+            "Remove project folder?",
+            f"Permanently delete the folder:\n{project.path}\n\n"
+            "Symlinks inside it (raw, processed, recipe links…) are removed, "
+            "their targets are not. Real directories inside, such as wd* "
+            "workspaces, ARE deleted.\n\n"
+            "The database entry is kept.",
+        ):
+            return
+        try:
+            removed = self.project_manager.remove_project_folder(project.id)
+        except Exception as exc:
+            self.refresh_status_label.setText(f"Removal failed: {exc}")
+            return
+        self._after_project_change(f"Deleted {removed}")
+
+    def _remove_project_recipe(self, health) -> None:
+        where = (
+            str(health.recipe_path)
+            if health.recipe_path else "(unknown location)"
+        )
+        state = (
+            "The folder will be permanently deleted."
+            if health.recipe_exists
+            else "The folder is missing; only the database record is removed."
+        )
+        if not self._confirm(
+            "Remove recipe from workbench?",
+            f"Remove recipe instance of '{health.project.name}':\n"
+            f"{where}\n\n{state}\n\n"
+            "Project links pointing into it will become dangling.",
+        ):
+            return
+        try:
+            removed = self.project_manager.remove_project_recipe(
+                health.project.id
+            )
+        except Exception as exc:
+            self.refresh_status_label.setText(f"Removal failed: {exc}")
+            return
+        self._after_project_change(
+            f"Deleted {removed}" if removed else "Removed recipe record"
+        )
 
     # ------------------------------------------------------------------
     # Cached sizes

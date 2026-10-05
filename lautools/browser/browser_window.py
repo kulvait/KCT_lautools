@@ -179,7 +179,7 @@ class BrowserWindow(QMainWindow):
 
         self.switch_menu = menu_bar.addMenu("&Switch")
         self.switch_menu.aboutToShow.connect(self._populate_switch_menu)
-
+        # Workspace
         self.workspace_menu = menu_bar.addMenu("&Workspace")
         self.workspace_menu.aboutToShow.connect(
             self._populate_workspace_menu
@@ -402,9 +402,7 @@ class BrowserWindow(QMainWindow):
 
         if "wd" not in workspace_names:
             create_action = self.workspace_menu.addAction("Create wd")
-            create_action.triggered.connect(
-                self.create_working_directory
-            )
+            create_action.triggered.connect(self.create_working_directory)
 
         create_custom_action = self.workspace_menu.addAction(
             "Create wd with custom suffix..."
@@ -986,7 +984,6 @@ class BrowserWindow(QMainWindow):
 
     def _list_raw_samples(self, raw_dir):
         program, args = script_command("--list", raw_dir)
-
         try:
             result = subprocess.run(
                 [program, *args],
@@ -1017,10 +1014,8 @@ class BrowserWindow(QMainWindow):
         if self.current_project is None:
             self.status_label.setText("No active project")
             return
-
         project_path = self.current_project.path
         workspace_path = project_path / directory_name
-
         if workspace_path.exists():
             message = (
                 f"Working directory already exists:\n"
@@ -1048,9 +1043,7 @@ class BrowserWindow(QMainWindow):
             samples = self._list_raw_samples(raw_dir)
         except RuntimeError as exc:
             log.error("Sample listing failed: %s", exc)
-            self.status_label.setText(
-                "Sample listing failed"
-            )
+            self.status_label.setText("Sample listing failed")
             return
 
         if not samples:

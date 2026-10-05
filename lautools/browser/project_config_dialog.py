@@ -70,6 +70,12 @@ PEOPLE_FIELDS = (
     ("PI", "pi"),
 )
 
+WARNING_STYLE = (
+    "background-color: #ffd6d6; color: #8b0000; "
+    "border: 1px solid #c00000; padding: 6px;"
+)
+MISSING_STYLE = "color: #b00020; font-weight: bold;"
+
 
 def format_bytes(num_bytes: int | None) -> str:
     if num_bytes is None:
@@ -192,6 +198,12 @@ class ProjectConfigDialog(QDialog):
         scroll.setWidgetResizable(True)
         content = QWidget()
         layout = QVBoxLayout(content)
+        self.disk_warning_label = QLabel("")
+        self.disk_warning_label.setWordWrap(True)
+        self.disk_warning_label.setTextFormat(Qt.PlainText)
+        self.disk_warning_label.setStyleSheet(WARNING_STYLE)
+        self.disk_warning_label.setVisible(False)
+        layout.addWidget(self.disk_warning_label)
         layout.addWidget(self._create_project_box())
         layout.addWidget(self._create_beamtime_box())
         layout.addWidget(self._create_storage_box())
@@ -221,6 +233,7 @@ class ProjectConfigDialog(QDialog):
         self._load_beamtimes()
         self._load_workspaces()
         self._reload_sizes()
+        self._update_disk_state()
         self._restore_active_state()
         self._update_buttons()
 
@@ -249,6 +262,18 @@ class ProjectConfigDialog(QDialog):
         path_label.setWordWrap(True)
         path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         form.addRow("Path:", path_label)
+
+        self.project_exists_label = QLabel("")
+        form.addRow("Folder exists:", self.project_exists_label)
+
+        self.recipe_name_label = QLabel("")
+        self.recipe_name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Recipe:", self.recipe_name_label)
+
+        self.recipe_path_label = QLabel("")
+        self.recipe_path_label.setWordWrap(True)
+        self.recipe_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Recipe folder:", self.recipe_path_label)
 
         self.description_edit = QPlainTextEdit(self.project.description or "")
         self.description_edit.setMaximumHeight(100)
@@ -776,6 +801,106 @@ class ProjectConfigDialog(QDialog):
             )
         self.refresh_all_button.setEnabled(available)
         self.force_check.setEnabled(available)
+
+    # ------------------------------------------------------------------
+    # Disk state
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _mark(label: QLabel, text: str, missing: bool) -> None:
+        label.setText(text)
+        label.setStyleSheet(MISSING_STYLE if missing else "")
+
+    def _update_disk_state(self) -> None:
+        warnings: list[str] = []
+
+        try:
+            health = self.project_manager.get_project_health(self.project)
+        except Exception as exc:
+            self.disk_warning_label.setText(f"Cannot inspect project: {exc}")
+            self.disk_warning_label.setVisible(True)
+            return
+
+        # Project folder
+        self._mark(
+            self.project_exists_label,
+            format_flag(health.project_exists),
+            health.project_exists is False,
+        )
+        if health.project_exists is False:
+            warnings.append(f"Project folder is missing: {self.project.path}")
+
+        # Recipe folder
+        if not health.has_recipe:
+            self.recipe_name_label.setText("— (not created from a recipe)")
+            self._mark(self.recipe_path_label, "—", False)
+        else:
+            self.recipe_name_label.setText(
+                health.recipe_instance.name if health.recipe_instance else "?"
+            )
+            if health.recipe_path is None:
+                self._mark(
+                    self.recipe_path_label,
+                    "(collection has no disk location)",
+                    True,
+                )
+                warnings.append("Recipe collection has no disk location")
+            else:
+                suffix = {
+                    True: "",
+                    False: "  [MISSING]",
+                    None: "  [cannot check]",
+                }[health.recipe_exists]
+                self._mark(
+                    self.recipe_path_label,
+                    f"{health.recipe_path}{suffix}",
+                    health.recipe_exists is False,
+                )
+                if health.recipe_exists is False:
+                    warnings.append(
+                        f"Recipe folder is missing: {health.recipe_path}"
+                    )
+
+        # Beamtime areas expected on GPFS
+        storage = (
+            self.db.get_beamtime_storage(self._current_beamtime_id)
+            if self._current_beamtime_id is not None else None
+        )
+        on_gpfs = storage is not None and storage.on_gpfs is True
+        for area, path in self._area_paths.items():
+            exists = path.is_dir()
+            row = self.area_rows[area]
+            row.exists_label.setStyleSheet(
+                MISSING_STYLE if on_gpfs and not exists else ""
+            )
+            if on_gpfs and not exists:
+                warnings.append(
+                    f"Beamtime {area} is missing although on GPFS: {path}"
+                )
+
+        # Symlinks inside the project
+        try:
+            links = self.project_manager.inspect_gpfs_links(
+                self.project, self._beamtimes
+            )
+        except Exception:
+            links = {}
+        for name, info in links.items():
+            if info.error:
+                warnings.append(f"Cannot inspect link {name}: {info.error}")
+            elif info.is_symlink and info.target_available is False:
+                warnings.append(f"Link {name} is dangling -> {info.target}")
+            elif info.is_symlink and info.matches_beamtime is False:
+                warnings.append(
+                    f"Link {name} points outside linked beamtime -> "
+                    f"{info.target}"
+                )
+
+        self.disk_warning_label.setText(
+            "⚠ Missing on disk:\n" + "\n".join(f"• {w}" for w in warnings)
+            if warnings else ""
+        )
+        self.disk_warning_label.setVisible(bool(warnings))
 
     # ------------------------------------------------------------------
     # Accept / close

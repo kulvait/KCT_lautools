@@ -42,7 +42,6 @@ class SampleSelectionDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Select samples for {target_name}")
         self.resize(450, 550)
-
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"{len(samples)} samples found. Select samples to include:"))
 

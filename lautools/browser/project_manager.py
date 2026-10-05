@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import sqlite3
 from typing import Any, Callable
+import shutil
+import stat
 
 from lautools.beamtime_scanner import (BeamtimeCandidate, inspect_candidate, parse_metadata_text)
 from lautools.db import (
@@ -94,6 +96,61 @@ class ProjectInfo:
             link.is_symlink is True and link.matches_beamtime is True
             for link in self.gpfs_links.values()
         )
+
+def _dir_exists(path: Path | None) -> bool | None:
+    """True/False if known; None if it cannot be determined."""
+    if path is None:
+        return None
+    try:
+        return stat.S_ISDIR(os.stat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+
+
+def _strictly_within(path: Path, root: Path) -> bool:
+    return path != root and root in path.parents
+
+
+@dataclass
+class ProjectHealth:
+    project: LaupyProject
+    project_exists: bool | None
+    recipe_link: LaupyProjectToRecipeInstance | None = None
+    recipe_instance: LaupyRecipeInstance | None = None
+    recipe_path: Path | None = None
+    recipe_exists: bool | None = None
+    beamtime_on_gpfs: bool | None = None
+
+    @property
+    def has_recipe(self) -> bool:
+        return self.recipe_link is not None
+
+    @property
+    def recipe_missing(self) -> bool:
+        return self.has_recipe and self.recipe_exists is False
+
+    @property
+    def project_missing_on_gpfs(self) -> bool:
+        return self.project_exists is False and self.beamtime_on_gpfs is True
+
+    @property
+    def needs_attention(self) -> bool:
+        return self.recipe_missing or self.project_missing_on_gpfs
+
+    def problems(self) -> list[str]:
+        result = []
+        if self.project_missing_on_gpfs:
+            result.append(
+                f"Project folder missing although beamtime is on GPFS: "
+                f"{self.project.path}"
+            )
+        if self.recipe_missing:
+            result.append(f"Recipe folder missing: {self.recipe_path}")
+        if self.has_recipe and self.recipe_path is None:
+            result.append("Recipe collection has no disk location")
+        return result
 
 class BeamtimeManager:
     """Filesystem operations only; persistence belongs to ProjectManager."""
@@ -824,3 +881,145 @@ class ProjectManager:
 
     def set_beamtime_label(self, beamtime_id: int, label: str | None) -> None:
         self.db.set_beamtime_label(beamtime_id, label)
+
+    # ------------------------------------------------------------------
+    # Disk state of a project
+    # ------------------------------------------------------------------
+
+    def recipe_instance_path(
+        self,
+        instance: LaupyRecipeInstance,
+    ) -> Path | None:
+        location = self.db.get_location(instance.collection_location_id)
+        if location is None or location.disk_location is None:
+            return None
+        return (
+            Path(location.disk_location).expanduser()
+            / instance.relative_path
+        )
+
+    def get_project_health(
+        self,
+        project: LaupyProject | int,
+        beamtime_on_gpfs: bool | None = None,
+    ) -> ProjectHealth:
+        project = self._project(project)
+
+        if beamtime_on_gpfs is None:
+            states = [
+                storage.on_gpfs
+                for beamtime in self.db.list_beamtimes_for_project(project.id)
+                if (storage := self.db.get_beamtime_storage(beamtime.id))
+                is not None
+            ]
+            if any(state is True for state in states):
+                beamtime_on_gpfs = True
+            elif states and all(state is False for state in states):
+                beamtime_on_gpfs = False
+
+        link = self.db.get_project_to_recipe_instance_for_project(project.id)
+        instance = (
+            self.db.get_recipe_instance(link.recipe_instance_id)
+            if link is not None else None
+        )
+        recipe_path = (
+            self.recipe_instance_path(instance)
+            if instance is not None else None
+        )
+
+        return ProjectHealth(
+            project=project,
+            project_exists=_dir_exists(project.path),
+            recipe_link=link,
+            recipe_instance=instance,
+            recipe_path=recipe_path,
+            recipe_exists=_dir_exists(recipe_path),
+            beamtime_on_gpfs=beamtime_on_gpfs,
+        )
+
+    # ------------------------------------------------------------------
+    # Destructive operations
+    # ------------------------------------------------------------------
+
+    def remove_project_entry(self, project: LaupyProject | int) -> None:
+        """Delete only the database record; files are not touched."""
+        project = self._project(project)
+        with self.db.transaction():
+            self.db.connection.execute(
+                "DELETE FROM laupy_project WHERE id = ?",
+                (project.id,),
+            )
+
+    def remove_project_folder(self, project: LaupyProject | int) -> Path:
+        """Delete a project folder strictly inside a linked scratch_cc.
+
+        Symlinks inside the folder are removed, their targets are not.
+        The database entry is kept.
+        """
+        project = self._project(project)
+        path = Path(os.path.abspath(project.path))
+        if path.is_symlink():
+            raise ValueError(f"Project path is a symlink: {path}")
+        if _dir_exists(path) is not True:
+            raise ValueError(f"Project folder does not exist: {path}")
+        path = path.resolve(strict=True)
+
+        scratches = [
+            (beamtime.core_path / "scratch_cc").resolve()
+            for beamtime in self.db.list_beamtimes_for_project(project.id)
+            if beamtime.core_path is not None
+        ]
+        if not any(_strictly_within(path, root) for root in scratches):
+            raise ValueError(
+                "Only folders strictly inside a linked beamtime's "
+                f"scratch_cc can be removed: {path}"
+            )
+
+        shutil.rmtree(path)
+        return path
+
+    def remove_project_recipe(self, project: LaupyProject | int) -> Path | None:
+        """Delete the project's recipe instance from its workbench.
+
+        Removes the folder (if present) and the recipe instance record;
+        the project link disappears via ON DELETE CASCADE.
+        """
+        project = self._project(project)
+        link = self.db.get_project_to_recipe_instance_for_project(project.id)
+        if link is None:
+            raise ValueError("Project has no recipe instance")
+        instance = self.db.get_recipe_instance(link.recipe_instance_id)
+        if instance is None:
+            raise ValueError("Recipe instance record does not exist")
+
+        collection = self.db.get_recipe_collection(
+            instance.collection_location_id
+        )
+        if collection is None or not collection.use_as_workbench:
+            raise ValueError("Recipe instance is not in a workbench")
+        if collection.use_as_cookbook:
+            raise ValueError(
+                "Collection is also a cookbook; refusing to delete from it"
+            )
+
+        recipe_path = self.recipe_instance_path(instance)
+        removed = None
+        if recipe_path is not None and os.path.lexists(recipe_path):
+            location = self.db.get_location(instance.collection_location_id)
+            root = Path(location.disk_location).expanduser().resolve(strict=True)
+            if recipe_path.is_symlink():
+                raise ValueError(f"Recipe path is a symlink: {recipe_path}")
+            resolved = recipe_path.resolve(strict=True)
+            if not _strictly_within(resolved, root) or not resolved.is_dir():
+                raise ValueError(
+                    f"Recipe folder is not inside its workbench: {resolved}"
+                )
+            shutil.rmtree(resolved)
+            removed = resolved
+
+        with self.db.transaction():
+            self.db.connection.execute(
+                "DELETE FROM laupy_recipe_instances WHERE id = ?",
+                (instance.id,),
+            )
+        return removed
