@@ -68,6 +68,7 @@ setup(
             "removeHotPixels = lautools.scripts.removeHotPixels:main",
             "createTickFile = lautools.scripts.createTickFile:main",
             "createWorkingDirectoryForMicrotomography = lautools.scripts.createWorkingDirectoryForMicrotomography:main",
+            "createWorkingDirectoryForNanotomography = lautools.scripts.createWorkingDirectoryForNanotomography:main",
             "binDenFile = lautools.scripts.binDenFile:main",
             "GPU = lautools.scripts.GPU:main",
             "lautools-browser = lautools.browser.main:main",
