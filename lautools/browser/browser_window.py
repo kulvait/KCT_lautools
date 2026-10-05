@@ -27,8 +27,8 @@ from PySide6.QtWidgets import (
 from lautools.browser.create_wd_dialogs import (
     ProcessLogDialog,
     SampleSelectionDialog,
-    script_command,
 )
+from lautools.working_directory_creator import WDCreator
 from lautools.browser.settings_dialog import SettingsDialog
 from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
@@ -982,34 +982,6 @@ class BrowserWindow(QMainWindow):
         directory_name = f"wd_{suffix.replace(' ', '_')}"
         self._create_named_working_directory(directory_name)
 
-    def _list_raw_samples(self, raw_dir):
-        program, args = script_command("--list", raw_dir)
-        try:
-            result = subprocess.run(
-                [program, *args],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(
-                f"Cannot run sample listing: {exc}"
-            ) from exc
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                result.stderr
-                or result.stdout
-                or "Sample listing failed"
-            )
-
-        return [
-            line.strip()
-            for line in result.stdout.splitlines()
-            if line.strip()
-            and not line.lstrip().startswith("#")
-        ]
-
     def _create_named_working_directory(self, directory_name: str):
         if self.current_project is None:
             self.status_label.setText("No active project")
@@ -1035,23 +1007,18 @@ class BrowserWindow(QMainWindow):
             )
             return
 
-        self.status_label.setText(
-            f"Listing samples in {raw_dir}..."
-        )
-
+        self.status_label.setText(f"Listing samples in {raw_dir}...")
+        wdc = None
         try:
-            samples = self._list_raw_samples(raw_dir)
-        except RuntimeError as exc:
+            wdc = WDCreator(self.current_project, db=self.db)
+            samples = wdc.getSampleList(raw_dir)
+        except (RuntimeError, ValueError) as exc:
             log.error("Sample listing failed: %s", exc)
             self.status_label.setText("Sample listing failed")
             return
 
         if not samples:
-            QMessageBox.information(
-                self,
-                "No samples",
-                f"No samples found in {raw_dir}.",
-            )
+            QMessageBox.information(self, "No samples found", f"No samples found in {raw_dir}.")
             self.status_label.setText("No samples found")
             return
 
@@ -1081,29 +1048,33 @@ class BrowserWindow(QMainWindow):
                 exist_ok=False,
             )
         except OSError as exc:
-            message = (
-                f"Failed to create working directory "
-                f"{workspace_path}: {exc}"
-            )
+            message = (f"Failed to create working directory {workspace_path}: {exc}")
             log.error(message)
             self.status_label.setText(message)
             return
 
         self._run_create_process(
+            wdc,
             raw_dir,
             workspace_path,
             selected_samples,
         )
 
-    def _run_create_process(self, raw_dir, workspace_path, samples):
-        program, args = script_command(
-            "--samples",
-            *samples,
-            "--",
-            raw_dir,
-            workspace_path,
-        )
-
+    def _run_create_process(self, creator, raw_dir, workspace_path, samples):
+        try:
+            program, args = creator.getCreationCommand(
+                workspace_path,
+                samples,
+                raw_dir=raw_dir,
+            )
+        except ValueError as exc:
+            self.status_label.setText(f"Cannot create working directory: {exc}")
+            QMessageBox.critical(
+                self,
+                "Working directory creation failed",
+                str(exc),
+            )
+            return
         def on_finished(success):
             if success:
                 self.status_label.setText(

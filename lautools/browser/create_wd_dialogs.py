@@ -1,4 +1,3 @@
-import sys
 import logging
 
 from PySide6.QtCore import QProcess, Qt
@@ -15,8 +14,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-SCRIPT_MODULE = "lautools.scripts.createWorkingDirectoryForMicrotomography"
-
 log = logging.getLogger(__name__)
 
 if not log.handlers:
@@ -30,12 +27,6 @@ if not log.handlers:
     log.addHandler(handler)
 
 log.propagate = False
-
-
-def script_command(*args):
-    """Program + argument list to invoke the script with the current interpreter."""
-    return sys.executable, ["-m", SCRIPT_MODULE, *[str(a) for a in args]]
-
 
 class SampleSelectionDialog(QDialog):
     def __init__(self, samples, target_name, parent=None):
