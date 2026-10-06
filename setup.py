@@ -65,13 +65,17 @@ setup(
     extras_require=extras,
     entry_points={
         "console_scripts": [
+            "lautools-browser = lautools.browser.main:main",
+            "binDenFile = lautools.scripts.binDenFile:main",
+            "GPU = lautools.scripts.GPU:main",
             "removeHotPixels = lautools.scripts.removeHotPixels:main",
             "createTickFile = lautools.scripts.createTickFile:main",
             "createWorkingDirectoryForMicrotomography = lautools.scripts.createWorkingDirectoryForMicrotomography:main",
             "createWorkingDirectoryForNanotomography = lautools.scripts.createWorkingDirectoryForNanotomography:main",
-            "binDenFile = lautools.scripts.binDenFile:main",
-            "GPU = lautools.scripts.GPU:main",
-            "lautools-browser = lautools.browser.main:main",
+            "tiffScanInfoForNanotomography = lautools.scripts.tiffScanInfoForNanotomography:main",
+            "tiffScanInfoForMicrotomography = lautools.scripts.tiffScanInfoForMicrotomography:main",
+            "tiffScanDataToZarrForNanotomography = lautools.scripts.tiffScanDataToZarrForNanotomography:main",
+            "tiffScanDataToZarrForMicrotomography = lautools.scripts.tiffScanDataToZarrForMicrotomography:main",
         ]
     },
     version=__version__,

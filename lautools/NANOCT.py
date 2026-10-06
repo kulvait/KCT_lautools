@@ -418,3 +418,65 @@ def scanDataset(LogScan, imgDir=None, one_based=True, drop_missing=True, check_b
 
 	df = pd.DataFrame(parsed)
 	return df
+
+def scanDatasetWithForeignDarkFields(
+	LogScan,
+	imgDir,
+	foreignLogScan,
+	foreignRawDir,
+	one_based=True,
+	drop_missing=True,
+	check_block_order=True,
+):
+	"""Append reference images from another measurement as dark fields.
+
+	Both measurements are processed independently using scanDataset.
+	Only foreign rows with image_key=1 are appended, with image_key=2.
+	All original rows are preserved, including any existing dark fields.
+
+	Original rows come first, followed by foreign dark-field rows.
+	Timestamps, file paths, counters, and block identifiers retain their
+	values from their respective measurements. Block identifiers are
+	therefore local to each measurement, not globally unique.
+
+	The parsing and matching errors from either measurement propagate.
+	Raises ValueError if no foreign reference rows remain after parsing
+	and applying drop_missing.
+	"""
+	options = {
+		"one_based": one_based,
+		"drop_missing": drop_missing,
+		"check_block_order": check_block_order,
+	}
+
+	dataset = scanDataset(LogScan, imgDir=imgDir, **options)
+	foreign_dataset = scanDataset(
+		foreignLogScan,
+		imgDir=foreignRawDir,
+		**options,
+	)
+
+	# scanDataset currently returns a columnless DataFrame when empty.
+	if foreign_dataset.empty:
+		raise ValueError(
+			f"No foreign reference images available from '{foreignLogScan}'."
+		)
+
+	dark_fields = foreign_dataset.loc[
+		foreign_dataset["image_key"] == 1
+	].copy()
+
+	if dark_fields.empty:
+		raise ValueError(
+			f"No foreign reference images (image_key=1) available "
+			f"from '{foreignLogScan}'."
+		)
+
+	dark_fields["image_key"] = 2
+
+	log.info(
+		"Appending %d foreign reference images as dark fields.",
+		len(dark_fields),
+	)
+
+	return pd.concat([dataset, dark_fields], ignore_index=True)
