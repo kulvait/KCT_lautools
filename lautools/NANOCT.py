@@ -219,32 +219,40 @@ def _parse_log(LogScan):
 
 	return start_time, rows
 
-
 def _split_log_blocks(rows):
-	"""Split log rows into consecutive blocks of the same image type.
+	"""Split log rows into acquisition blocks.
 
 	A new block starts when:
-	- image type changes, or
-	- counter does not strictly increase.
+	- image type changes;
+	- counter (#04) does not strictly increase;
+	- reference acquisition identifiers (#02, #03) change.
+
+	Reference identifiers distinguish consecutive reference acquisitions
+	even when their counters keep increasing.
 	"""
 	blocks = []
-	cur = []
-
-	for idx, row in enumerate(rows):
-		if cur:
-			prev = rows[cur[-1]]
+	current = []
+	for index, row in enumerate(rows):
+		if current:
+			previous = rows[current[-1]]
+			reference_acquisition_changed = (
+				row["type"] == previous["type"] == "ref"
+				and (
+					row["n02"] != previous["n02"]
+					or row["n03"] != previous["n03"]
+				)
+			)
 			new_block = (
-				row["type"] != prev["type"]
-				or row["counter"] <= prev["counter"]
+				row["type"] != previous["type"]
+				or row["counter"] <= previous["counter"]
+				or reference_acquisition_changed
 			)
 			if new_block:
-				blocks.append(cur)
-				cur = []
-		cur.append(idx)
-
-	if cur:
-		blocks.append(cur)
-
+				blocks.append(current)
+				current = []
+		current.append(index)
+	if current:
+		blocks.append(current)
 	return blocks
 
 
@@ -307,7 +315,7 @@ def _match_blocks(rows, log_blocks, file_blocks):
 # Function to process data from P05 nanoCT log file
 # LogScan shall be location of LogScan.log file
 # imgDir shall be location of the directory where the acquisition images are stored
-def scanDataset(LogScan, imgDir=None, one_based=True, drop_missing=False, check_block_order=False):
+def scanDataset(LogScan, imgDir=None, one_based=True, drop_missing=True, check_block_order=True):
 	"""Process data from P05 nanoCT log file.
 
 	Parameters
@@ -358,9 +366,14 @@ def scanDataset(LogScan, imgDir=None, one_based=True, drop_missing=False, check_
 			"Log: %d rows in %d blocks; raw: %d files in %d blocks",
 			len(rows), len(log_blocks), len(records), len(file_blocks)
 		)
-
 		assignment = _match_blocks(rows, log_blocks, file_blocks)
-
+		matched_paths = set(assignment.values())
+		unmatched_files = [record["path"] for record in records if record["path"] not in matched_paths]
+		if unmatched_files:
+			raise ValueError(
+				"Some TIFF files were not matched to any log block: "
+				+ ", ".join(unmatched_files)
+			)
 		for block_index, log_block in enumerate(log_blocks):
 			missing = [rows[i]["counter"] for i in log_block if i not in assignment]
 			if missing:
