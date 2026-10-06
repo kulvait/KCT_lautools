@@ -15,6 +15,9 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import io
+from contextlib import redirect_stdout, redirect_stderr
+import sys
 from pathlib import Path
 import shutil
 import tempfile
@@ -41,7 +44,7 @@ SERIALIZER_CODECS = {
 }
 
 
-def build_parser():
+def buildParser():
 	parser = argparse.ArgumentParser(
 		description="Convert nanoCT LogScan.log and raw TIFF files to Zarr."
 	)
@@ -322,7 +325,21 @@ def removePath(path):
 
 
 def main(argv=None):
-	parser = build_parser()
+	# Redirect stdout and stderr to capture argparse help messages
+	parser = buildParser()
+	try:
+		_out = io.StringIO()
+		_err = io.StringIO()
+		with redirect_stdout(_out), redirect_stderr(_err):
+			arg_list = sys.argv[1:] if argv is None else argv
+			if not arg_list:
+				arg_list = ["--help"]
+			ARG = parser.parse_args(arg_list)
+	except SystemExit as err:
+		print("tiffScanDataToZarrForNanotomography program to convert nanoCT TIFF acquisitions into Zarr stacks.")
+		sys.stderr.write(_err.getvalue())
+		sys.stdout.write(_out.getvalue())
+		return err.code
 	print("START tiffScanDataToZarrForMicrotomography %s" % " ".join(sys.argv[1:]))
 	parser = buildParser()
 	ARG = parser.parse_args(argv)

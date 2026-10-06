@@ -13,6 +13,8 @@ estimation is used.
 """
 import argparse
 import os
+import io
+from contextlib import redirect_stdout, redirect_stderr
 import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -400,8 +402,21 @@ def plotInfoOverview(info, mainLabel, currentCorrection, pdf=None):
 
 
 def main(argv=None):
+    # Redirect stdout and stderr to capture argparse help messages
     parser = buildParser()
-    ARG = parser.parse_args(argv)
+    try:
+        _out = io.StringIO()
+        _err = io.StringIO()
+        with redirect_stdout(_out), redirect_stderr(_err):
+            arg_list = sys.argv[1:] if argv is None else argv
+            if not arg_list:
+                arg_list = ["--help"]
+            ARG = parser.parse_args(arg_list)
+    except SystemExit as err:
+        print("Program to produce Zarr file from raw TIFF structure. Usage:")
+        sys.stderr.write(_err.getvalue())
+        sys.stdout.write(_out.getvalue())
+        return err.code
     print("START tiffScanInfoForNanotomography %s" % " ".join(sys.argv[1:]))
 
     if not np.isfinite(ARG.lower_quantile) or not 0 < ARG.lower_quantile <= 1:
