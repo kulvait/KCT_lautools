@@ -1,0 +1,6 @@
+[build-system]
+requires = [
+    "setuptools",
+    "GitPython",
+]
+build-backend = "setuptools.build_meta"
