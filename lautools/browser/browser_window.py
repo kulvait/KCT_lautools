@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import html
+import os
 from pathlib import Path
 import subprocess
 
@@ -153,34 +154,16 @@ class BrowserWindow(QMainWindow):
         self.beamtime_menu = menu_bar.addMenu("&Beamtime")
         self.beamtime_menu.aboutToShow.connect(self._populate_beamtime_menu)
         # Project
-        project_menu = menu_bar.addMenu("&Project")
-        self.configure_action = project_menu.addAction("Project info...")
-        self.configure_action.triggered.connect(self.configure_project)
-        self.open_terminal_action = project_menu.addAction("Open Terminal")
-        self.open_terminal_action.triggered.connect(self._open_project_terminal)
-
-        project_menu.addSeparator()
-
-        self.create_wd_action = project_menu.addAction("Create wd")
-        self.create_wd_action.triggered.connect(
-            self.create_working_directory
-        )
-
-        self.create_custom_wd_action = project_menu.addAction(
-            "Create wd with custom suffix..."
-        )
-        self.create_custom_wd_action.triggered.connect(
-            self.create_working_directory_with_suffix
-        )
-
-        self.switch_menu = menu_bar.addMenu("&Switch")
-        self.switch_menu.aboutToShow.connect(self._populate_switch_menu)
+        self.project_menu = menu_bar.addMenu("&Project")
+        self.project_menu.setToolTipsVisible(True)
+        self.project_menu.aboutToShow.connect(self._populate_project_menu)
         # Workspace
         self.workspace_menu = menu_bar.addMenu("&Workspace")
-        self.workspace_menu.aboutToShow.connect(
-            self._populate_workspace_menu
-        )
-
+        self.workspace_menu.setToolTipsVisible(True)
+        self.workspace_menu.aboutToShow.connect(self._populate_workspace_menu)
+        # Switch
+        self.switch_menu = menu_bar.addMenu("&Switch")
+        self.switch_menu.aboutToShow.connect(self._populate_switch_menu)
         # Help
         help_menu = menu_bar.addMenu("&Help")
         repository_action = help_menu.addAction("Project Repository")
@@ -191,24 +174,213 @@ class BrowserWindow(QMainWindow):
         about_action = help_menu.addAction("About Lautools")
         about_action.triggered.connect(self._show_about)
 
+    #-------------------------------------------------------------------
+    # File menu
+    #-------------------------------------------------------------------
+
     def open_settings(self):
         SettingsDialog(self.db, parent=self).exec()
+
+    # ------------------------------------------------------------------
+    # Project Menu
+    # ------------------------------------------------------------------
+
+    def _populate_project_menu(self):
+        self.project_menu.clear()
+
+        self.project_configure_action = self.project_menu.addAction("Project info...")
+        self.project_configure_action.setEnabled(self.current_project is not None)
+        self.project_configure_action.triggered.connect(self.configure_project)
+        
+        # On error when opening vim, terminal, or thunar, display the error in the status bar.
+        def on_error(error):
+            self.status_label.setText(f"Error: {error}")
+        # Add open actions in terminal or thunar for project, workspace, recipe, and upstream recipe
+        self.current_project_recipes = self.get_project_recipes()
+        if self.current_project is not None:
+            self._add_open_action(self.project_menu, "Open Terminal", self.current_project.path, open_terminal)
+            self._add_open_action(self.project_menu, "Open Thunar", self.current_project.path, open_thunar)
+            if self.current_workspace is not None:
+                workspace_name = self.current_workspace.name or "Workspace"
+                self._add_open_action(self.project_menu, f"Open Terminal in {workspace_name}", self.current_workspace.path, open_terminal)
+                self._add_open_action(self.project_menu, f"Open Thunar in {workspace_name}", self.current_workspace.path, open_thunar)
+            if self.current_project_recipes.get("workbench_instance_path") is not None:
+                recipe_name = self.current_project_recipes["workbench_instance"].name or ""
+                self._add_open_action(self.project_menu, f"Open Terminal for recipe {recipe_name}", self.current_project_recipes["workbench_instance_path"], open_terminal)
+                self._add_open_action(self.project_menu, f"Open Thunar for recipe {recipe_name}", self.current_project_recipes["workbench_instance_path"], open_thunar)
+            if self.current_project_recipes.get("upstream_instance_path") is not None:
+                upstream_name = self.current_project_recipes["upstream_instance"].name or ""
+                self._add_open_action(self.project_menu, f"Open Terminal for upstream recipe {upstream_name}", self.current_project_recipes["upstream_instance_path"], open_terminal)
+                self._add_open_action(self.project_menu, f"Open Thunar for upstream recipe {upstream_name}", self.current_project_recipes["upstream_instance_path"], open_thunar)
+            if (self.current_project.path / "INFO").is_file():
+                self.project_menu.addAction("Open INFO in vim").triggered.connect(lambda: open_files_vim([str(self.current_project.path / "INFO")], on_error=on_error))
+                self.project_menu.addAction("Open INFO in mousepad").triggered.connect(lambda: open_files_mousepad([str(self.current_project.path / "INFO")], on_error=on_error))
+            else:
+                log.info("INFO file not found in project path: %s", (self.current_project.path / "INFO"))
+        self.project_menu.addSeparator()
+        wd_dirs = self.current_on_disk_wd_dirs()
+        self._add_workspace_creation_actions(self.project_menu, wd_dirs)
+
+    def _add_workspace_creation_actions(self, menu: QMenu, wd_dirs: list[str]):
+        if "wd" not in wd_dirs:
+            create_action = menu.addAction("Create wd")
+            create_action.triggered.connect(self.create_working_directory)
+        create_custom_action = menu.addAction("Create wd with custom suffix...")
+        create_custom_action.triggered.connect(self.create_working_directory_with_suffix)
+
+    def get_project_recipes(self) -> Dict[str, LaupyRecipeInstance]:
+        """
+        Return a dictionary mapping recipe names to LaupyRecipeInstance objects for the current project.
+        """
+        if self.current_project is None:
+            return {}
+        try:
+            recipes = {}
+            project_to_recipe = self.db.get_project_to_recipe_instance_for_project(self.current_project.id)
+            if project_to_recipe is not None:
+                recipes["workbench_instance_exist"] = True
+                recipes["workbench_instance_id"] = project_to_recipe.recipe_instance_id
+                recipes["workbench_instance"] = (self.db.get_recipe_instance(project_to_recipe.recipe_instance_id))
+            else:
+                recipes["workbench_instance_exist"] = False
+                recipes["workbench_instance_id"] = None
+                recipes["workbench_instance"] = None
+            if recipes["workbench_instance"] is not None:
+                recipes["workbench_instance_path"] = self.project_manager.recipe_instance_path(recipes["workbench_instance"])
+                if recipes["workbench_instance"].cloned_from_instance_id is not None:
+                    source = self.db.get_recipe_instance(recipes["workbench_instance"].cloned_from_instance_id)
+                    if source is not None:
+                        recipes["upstream_instance"] = source
+                        recipes["upstream_instance_path"] = self.project_manager.recipe_instance_path(source)
+                    else:
+                        recipes["upstream_instance"] = None
+                        recipes["upstream_instance_path"] = None
+            return recipes
+        except Exception:
+            log.exception("Cannot resolve project recipes")
+            return {}
+
+    def _add_open_action(self, menu: QMenu, label: str, path: Path | None, opener):
+        action = menu.addAction(label)
+        action.setEnabled(self._folder_available(path))
+        action.setToolTip(str(path) if path is not None else "No associated folder")
+        action.triggered.connect(lambda checked=False, p=path, launch=opener: launch(p, on_error=lambda error: self.status_label.setText(f"Error: {error}")))
+        return action
+
+    @staticmethod
+    def _folder_available(path: Path | None) -> bool:
+        if path is None:
+            return False
+        try:
+            return path.is_dir()
+        except OSError:
+            return False
 
     def _open_project_terminal(self):
         if self.current_project is None:
             self.status_label.setText("No project selected")
             return
-        target = self.current_project.path
-        if not target.is_dir():
-            msg = f"Project path does not exist: {target}"
-            log.warning(msg)
-            self.status_label.setText(msg)
-        open_terminal(
-            target,
-            on_error=lambda error: self.status_label.setText(
-                f"Error: {error}"
-            ),
-        )
+        open_terminal(target,  on_error=lambda error: self.status_label.setText(f"Error: {error}"),)
+
+    def current_on_disk_wd_dirs(self):
+        """
+        Return a list of strings that identify folders in project directory starting with "wd" that are currently on disk.
+    
+        The filesystem is authoritative. Existing database rows are ignored if
+        their directories have disappeared. New directories are registered in
+        the database so that they can participate in history.
+        """
+        try:
+            project_path = self.current_project.path.resolve()
+            wd_paths = sorted( entry.name for entry in project_path.iterdir() if entry.is_dir() and entry.name.startswith("wd"))
+            return wd_paths
+        except Exception:
+            log.exception("Cannot resolve current project path")
+            return []
+
+    def get_project_workspaces(self, register_disk_workspaces=True):
+        """
+        Return workspace information for the current project. Include wokspaces in the database and project subfolders starting with "wd" that are currently on disk.
+        
+        If ``register_disk_workspaces`` is True, wd subfolders that are not yet registered in the database will be registered and included in the returned list.
+    
+        Each returned dictionary contains:
+    
+        ``workspace``
+            The database workspace object, or None if the directory only exists
+            on disk.
+
+        ``workspace_path_exists``
+            True if the workspace path exists on disk.
+    
+        ``wd_subfolder_name``
+            The workspace directory name on disk, or None if the workspace only
+            exists in the database.
+    
+        """
+        if self.current_project is None:
+            return []
+        workspaces_in_db = self.db.list_workspaces_for_project(self.current_project.id)
+        wd_subfolder_names = self.current_on_disk_wd_dirs()
+        # Create collections for path comparison
+        workspaces_in_db_by_path = {ws.path.resolve(): ws for ws in workspaces_in_db}
+        wd_subfolder_names_by_path = { (self.current_project.path / name).resolve(): name for name in wd_subfolder_names }
+        all_paths = ( workspaces_in_db_by_path.keys() | wd_subfolder_names_by_path.keys() )
+        workspaces = []
+        for path in all_paths:
+            workspace = workspaces_in_db_by_path.get(path) # None if the path is not in workspaces_in_db_by_path
+            wd_subfolder_name = wd_subfolder_names_by_path.get(path) # None if the path is not in wd_subfolder_names_by_path
+            if workspace is None and register_disk_workspaces:
+                try:
+                    workspace = self.project_manager.register_workspace(self.current_project, path,)
+                except Exception:
+                    log.exception("Cannot register workspace directory: %s of project %s", path, self.current_project.path,)
+            workspaces.append({
+                "workspace": workspace,
+                "wd_subfolder_name": wd_subfolder_name,
+                "workspace_path_exists": path.is_dir()
+            })
+        return workspaces
+
+
+    #------------------------------------------------------------------
+    # Workspace menu
+    #------------------------------------------------------------------
+
+    def _populate_workspace_menu(self):
+        self.workspace_menu.clear()
+
+        if self.current_project is None:
+            action = self.workspace_menu.addAction("(No project selected)")
+            action.setEnabled(False)
+            return
+
+        # Always scan the filesystem when the menu is opened.
+        workspaces = self.get_project_workspaces(register_disk_workspaces=True)
+        current_workspace_id = (self.current_workspace.id if self.current_workspace is not None else None )
+
+        if not workspaces or len(workspaces) == 0:
+            action = self.workspace_menu.addAction("(No wd* directories)")
+            action.setEnabled(False)
+        else:
+            action_group = QActionGroup(self.workspace_menu)
+            action_group.setExclusive(True)
+            for workspace_info in workspaces:
+                workspace = workspace_info["workspace"]
+                action = self.workspace_menu.addAction(workspace.name)
+                action.setCheckable(True)
+                action.setChecked(workspace.id == current_workspace_id)
+                action.setToolTip(str(workspace.path))
+                action_group.addAction(action)
+                if not workspace_info["workspace_path_exists"]:
+                    action.setEnabled(False)
+                    action.setToolTip(f"{workspace.path} (no longer exists on disk)")
+                else:
+                    action.triggered.connect(lambda checked=False, workspace_id=workspace.id:self.select_workspace_by_id(workspace_id))
+        
+        self.workspace_menu.addSeparator()
+        workspace_names = {ws_info["workspace"].name for ws_info in workspaces if ws_info["workspace"] is not None}
+        self._add_workspace_creation_actions(self.workspace_menu, workspace_names)
 
     # ------------------------------------------------------------------
     # Project switch menu
@@ -299,113 +471,6 @@ class BrowserWindow(QMainWindow):
 
         self._activate_project(project)
 
-    # ------------------------------------------------------------------
-    # Workspace discovery
-    # ------------------------------------------------------------------
-
-    def _scan_workspaces_from_disk(self):
-        """
-        Return workspace database objects for directories currently on disk.
-
-        The filesystem is authoritative. Existing database rows are ignored if
-        their directories have disappeared. New directories are registered in
-        the database so that they can participate in history.
-        """
-        if self.current_project is None:
-            return []
-
-        project_path = self.current_project.path.resolve()
-
-        try:
-            paths = sorted(
-                (
-                    entry
-                    for entry in project_path.iterdir()
-                    if entry.is_dir() and entry.name.startswith("wd")
-                ),
-                key=lambda path: path.name.lower(),
-            )
-        except OSError as exc:
-            self.status_label.setText(
-                f"Cannot list working directories: {exc}"
-            )
-            return []
-
-        workspaces = []
-
-        for path in paths:
-            try:
-                workspace = self.project_manager.register_workspace(
-                    self.current_project,
-                    path,
-                )
-            except Exception:
-                log.exception(
-                    "Cannot register workspace directory: %s",
-                    path,
-                )
-                continue
-
-            workspaces.append(workspace)
-
-        return workspaces
-
-    def _populate_workspace_menu(self):
-        self.workspace_menu.clear()
-
-        if self.current_project is None:
-            action = self.workspace_menu.addAction(
-                "(No project selected)"
-            )
-            action.setEnabled(False)
-            return
-
-        # Always scan the filesystem when the menu is opened.
-        workspaces = self._scan_workspaces_from_disk()
-
-        current_workspace_id = (
-            self.current_workspace.id
-            if self.current_workspace is not None
-            else None
-        )
-
-        if not workspaces:
-            action = self.workspace_menu.addAction(
-                "(No wd* directories)"
-            )
-            action.setEnabled(False)
-        else:
-            action_group = QActionGroup(self.workspace_menu)
-            action_group.setExclusive(True)
-
-            for workspace in workspaces:
-                action = self.workspace_menu.addAction(workspace.name)
-                action.setCheckable(True)
-                action.setChecked(
-                    workspace.id == current_workspace_id
-                )
-                action.setToolTip(str(workspace.path))
-                action_group.addAction(action)
-
-                action.triggered.connect(
-                    lambda checked=False, workspace_id=workspace.id:
-                    self.select_workspace_by_id(workspace_id)
-                )
-
-        self.workspace_menu.addSeparator()
-
-        workspace_names = {workspace.name for workspace in workspaces}
-
-        if "wd" not in workspace_names:
-            create_action = self.workspace_menu.addAction("Create wd")
-            create_action.triggered.connect(self.create_working_directory)
-
-        create_custom_action = self.workspace_menu.addAction(
-            "Create wd with custom suffix..."
-        )
-        create_custom_action.triggered.connect(
-            self.create_working_directory_with_suffix
-        )
 
     # ------------------------------------------------------------------
     # Main UI
@@ -1229,12 +1294,7 @@ class BrowserWindow(QMainWindow):
 
     def _update_action_states(self):
         has_project = self.current_project is not None
-
         self.close_action.setEnabled(has_project)
-        self.open_terminal_action.setEnabled(has_project)
-        self.configure_action.setEnabled(has_project)
-        self.create_wd_action.setEnabled(has_project)
-        self.create_custom_wd_action.setEnabled(has_project)
 
     def _reset_tab_texts(self):
         self.tasks_label.setText(
