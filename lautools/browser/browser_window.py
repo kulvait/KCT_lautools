@@ -137,6 +137,12 @@ class BrowserWindow(QMainWindow):
         menu_bar = self.menuBar()
         # File
         file_menu = menu_bar.addMenu("&File")
+        self.open_action = file_menu.addAction("Open Project...")
+        self.open_action.setShortcut("Ctrl+O")
+        self.open_action.triggered.connect(self.open_project)
+        self.close_action = file_menu.addAction("Close Project")
+        self.close_action.setShortcut("Ctrl+W")
+        self.close_action.triggered.connect(self.close_project)
         settings_action = file_menu.addAction("Settings...")
         settings_action.triggered.connect(self.open_settings)
         file_menu.addSeparator()
@@ -148,20 +154,10 @@ class BrowserWindow(QMainWindow):
         self.beamtime_menu.aboutToShow.connect(self._populate_beamtime_menu)
         # Project
         project_menu = menu_bar.addMenu("&Project")
-        self.open_action = project_menu.addAction("Open Project...")
-        self.open_action.setShortcut("Ctrl+O")
-        self.open_action.triggered.connect(self.open_project)
-        self.close_action = project_menu.addAction("Close Project")
-        self.close_action.setShortcut("Ctrl+W")
-        self.close_action.triggered.connect(self.close_project)
-
-        self.configure_action = project_menu.addAction("Configure...")
+        self.configure_action = project_menu.addAction("Project info...")
         self.configure_action.triggered.connect(self.configure_project)
-
         self.open_terminal_action = project_menu.addAction("Open Terminal")
-        self.open_terminal_action.triggered.connect(
-            self._open_project_terminal
-        )
+        self.open_terminal_action.triggered.connect(self._open_project_terminal)
 
         project_menu.addSeparator()
 
@@ -202,11 +198,11 @@ class BrowserWindow(QMainWindow):
         if self.current_project is None:
             self.status_label.setText("No project selected")
             return
-
-        target = self.current_working_directory
-        if target is None:
-            target = self.current_project.path
-
+        target = self.current_project.path
+        if not target.is_dir():
+            msg = f"Project path does not exist: {target}"
+            log.warning(msg)
+            self.status_label.setText(msg)
         open_terminal(
             target,
             on_error=lambda error: self.status_label.setText(
