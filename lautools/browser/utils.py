@@ -76,6 +76,8 @@ def open_files_vim(files: List[str], working_dir: Optional[Path] = None,
         directory = Path(files[0]).parent
     try:
         cmd = f"vim {' '.join(map(shlex.quote, files))}"
+        # Use bash -ilc to ensure the terminal is interactive and login, which helps with environment variables
+        cmd = f"bash -ilc {shlex.quote('exec vim ' + ' '.join(map(shlex.quote, files)))}"
         subprocess.Popen([
             "xfce4-terminal", 
             "--working-directory", str(directory), 
