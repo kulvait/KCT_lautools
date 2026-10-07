@@ -619,158 +619,6 @@ class BrowserWindow(QMainWindow):
         self.status_bar.addWidget(self.status_label)
         self.status_bar.addPermanentWidget(self.location_status)
 
-    # ------------------------------------------------------------------
-    # Project activation and restoration
-    # ------------------------------------------------------------------
-
-    def _activate_project(self, project):
-        self.current_project = project
-        self.current_workspace = None
-
-        try:
-            self.db.add_listed_project(project.id)
-            self.project_manager.record_project_open(project)
-        except Exception:
-            log.exception(
-                "Cannot record project open: %s",
-                project.path,
-            )
-
-        # Metadata refresh only. It does not calculate directory sizes.
-        try:
-            self.project_manager.refresh_project_metadata(project)
-        except Exception:
-            log.exception(
-                "Cannot refresh project metadata: %s",
-                project.path,
-            )
-
-        refreshed = self.db.get_project(project.id)
-        if refreshed is not None:
-            self.current_project = refreshed
-
-        self._update_current_project_ui()
-        self._load_project()
-        self._restore_workspace()
-
-    def _restore_last_project(self):
-        """
-        Restore the most recent project unless the latest history event was
-        an explicit close event.
-        """
-        try:
-            project = self.project_manager.current_project()
-        except Exception:
-            log.exception("Cannot restore project from application history")
-            return
-
-        if project is None:
-            log.info("No project to restore from application history")
-            return
-
-        if not project.path.is_dir():
-            log.warning(
-                "Last project no longer exists: %s",
-                project.path,
-            )
-            return
-
-        self.current_project = project
-        self._update_current_project_ui()
-        self._load_project()
-        self._restore_workspace()
-
-    def _restore_workspace(self):
-        if self.current_project is None:
-            return
-
-        try:
-            workspace = self.db.last_workspace(
-                self.current_project.id
-            )
-        except Exception:
-            log.exception("Cannot restore last workspace")
-            return
-
-        if workspace is None:
-            return
-
-        # Filesystem is authoritative. Do not restore a deleted workspace.
-        if not workspace.path.is_dir():
-            log.info(
-                "Previously selected workspace is no longer on disk: %s",
-                workspace.path,
-            )
-            return
-
-        try:
-            self.current_workspace = self.project_manager.register_workspace(
-                self.current_project,
-                workspace.path,
-            )
-        except Exception:
-            log.exception(
-                "Cannot restore workspace: %s",
-                workspace.path,
-            )
-            return
-
-        self.select_workspace(
-            self.current_workspace,
-            persist=False,
-        )
-
-    def _load_project(self):
-        self._reset_tab_texts()
-        self.refresh_locations()
-        self._update_action_states()
-
-    # ------------------------------------------------------------------
-    # Project open / close
-    # ------------------------------------------------------------------
-
-    def open_project(self):
-        directory = QFileDialog.getExistingDirectory(self, "Open Project Directory", )
-        if not directory:
-            return
-        path = Path(directory).resolve()
-        if not path.is_dir():
-            self.status_label.setText(f"Not a directory: {path}")
-            return
-
-        try:
-            project = self.project_manager.register_project(path)
-        except Exception as exc:
-            log.exception("Cannot register project: %s", path)
-            self.status_label.setText(f"Could not open project: {exc}")
-            return
-        self._activate_project(project)
-
-    # Compatibility alias for existing signal connections.
-    open_location = open_project
-
-    def close_project(self):
-        try:
-            # A null project/workspace row is intentional and represents
-            # that the application was closed without an active project.
-            self.project_manager.record_project_close()
-        except Exception:
-            log.exception("Cannot record project close")
-
-        self.current_project = None
-        self.current_workspace = None
-
-        self.location_list.clear()
-        self.left_title.setText("No working directory selected")
-        self.location_status.setText("No project selected")
-        self.status_label.setText("Ready")
-
-        self.tabs.setCurrentIndex(0)
-        self._reset_tab_texts()
-        self._update_current_project_ui()
-
-    # Compatibility alias for existing signal connections.
-    close_location = close_project
 
     # ------------------------------------------------------------------
     # Workspace selection
@@ -1766,3 +1614,156 @@ class BrowserWindow(QMainWindow):
             label.setOpenExternalLinks(True)
 
         message.exec()
+
+    # ------------------------------------------------------------------
+    # Project activation and restoration
+    # ------------------------------------------------------------------
+
+    def _activate_project(self, project):
+        self.current_project = project
+        self.current_workspace = None
+
+        try:
+            self.db.add_listed_project(project.id)
+            self.project_manager.record_project_open(project)
+        except Exception:
+            log.exception(
+                "Cannot record project open: %s",
+                project.path,
+            )
+
+        # Metadata refresh only. It does not calculate directory sizes.
+        try:
+            self.project_manager.refresh_project_metadata(project)
+        except Exception:
+            log.exception(
+                "Cannot refresh project metadata: %s",
+                project.path,
+            )
+
+        refreshed = self.db.get_project(project.id)
+        if refreshed is not None:
+            self.current_project = refreshed
+
+        self._update_current_project_ui()
+        self._load_project()
+        self._restore_workspace()
+
+    def _restore_last_project(self):
+        """
+        Restore the most recent project unless the latest history event was
+        an explicit close event.
+        """
+        try:
+            project = self.project_manager.current_project()
+        except Exception:
+            log.exception("Cannot restore project from application history")
+            return
+
+        if project is None:
+            log.info("No project to restore from application history")
+            return
+
+        if not project.path.is_dir():
+            log.warning(
+                "Last project no longer exists: %s",
+                project.path,
+            )
+            return
+
+        self.current_project = project
+        self._update_current_project_ui()
+        self._load_project()
+        self._restore_workspace()
+
+    def _restore_workspace(self):
+        if self.current_project is None:
+            return
+
+        try:
+            workspace = self.db.last_workspace(
+                self.current_project.id
+            )
+        except Exception:
+            log.exception("Cannot restore last workspace")
+            return
+
+        if workspace is None:
+            return
+
+        # Filesystem is authoritative. Do not restore a deleted workspace.
+        if not workspace.path.is_dir():
+            log.info(
+                "Previously selected workspace is no longer on disk: %s",
+                workspace.path,
+            )
+            return
+
+        try:
+            self.current_workspace = self.project_manager.register_workspace(
+                self.current_project,
+                workspace.path,
+            )
+        except Exception:
+            log.exception(
+                "Cannot restore workspace: %s",
+                workspace.path,
+            )
+            return
+
+        self.select_workspace(
+            self.current_workspace,
+            persist=False,
+        )
+
+    def _load_project(self):
+        self._reset_tab_texts()
+        self.refresh_locations()
+        self._update_action_states()
+
+    # ------------------------------------------------------------------
+    # Project open / close
+    # ------------------------------------------------------------------
+
+    def open_project(self):
+        directory = QFileDialog.getExistingDirectory(self, "Open Project Directory", )
+        if not directory:
+            return
+        path = Path(directory).resolve()
+        if not path.is_dir():
+            self.status_label.setText(f"Not a directory: {path}")
+            return
+
+        try:
+            project = self.project_manager.register_project(path)
+        except Exception as exc:
+            log.exception("Cannot register project: %s", path)
+            self.status_label.setText(f"Could not open project: {exc}")
+            return
+        self._activate_project(project)
+
+    # Compatibility alias for existing signal connections.
+    open_location = open_project
+
+    def close_project(self):
+        try:
+            # A null project/workspace row is intentional and represents
+            # that the application was closed without an active project.
+            self.project_manager.record_project_close()
+        except Exception:
+            log.exception("Cannot record project close")
+
+        self.current_project = None
+        self.current_workspace = None
+
+        self.location_list.clear()
+        self.left_title.setText("No working directory selected")
+        self.location_status.setText("No project selected")
+        self.status_label.setText("Ready")
+
+        self.tabs.setCurrentIndex(0)
+        self._reset_tab_texts()
+        self._update_current_project_ui()
+
+    # Compatibility alias for existing signal connections.
+    close_location = close_project
