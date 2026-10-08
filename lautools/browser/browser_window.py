@@ -212,6 +212,8 @@ class BrowserWindow(QMainWindow):
                 upstream_name = self.current_project_recipes["upstream_instance"].name or ""
                 self._add_open_action(self.project_menu, f"Open Terminal for upstream recipe {upstream_name}", self.current_project_recipes["upstream_instance_path"], open_terminal)
                 self._add_open_action(self.project_menu, f"Open Thunar for upstream recipe {upstream_name}", self.current_project_recipes["upstream_instance_path"], open_thunar)
+            if (self.current_project.path / "sbatch").is_dir():
+                self._add_open_action(self.project_menu, "Open terminal in sbatch", (self.current_project.path / "sbatch").resolve(), open_terminal)
             if (self.current_project.path / "INFO").is_file():
                 self.project_menu.addAction("Open INFO in vim").triggered.connect(lambda: open_files_vim([str(self.current_project.path / "INFO")], on_error=on_error))
                 self.project_menu.addAction("Open INFO in mousepad").triggered.connect(lambda: open_files_mousepad([str(self.current_project.path / "INFO")], on_error=on_error))
