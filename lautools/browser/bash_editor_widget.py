@@ -69,6 +69,8 @@ from lautools.browser.bash_script_model import (
     parse_functions,
 )
 
+from lautools.browser.submitslurm_context import SubmitslurmContext, WRAPPER
+
 
 def _fmt(color=None, bold=False, italic=False, background=None):
     f = QTextCharFormat()
@@ -177,19 +179,22 @@ class BashSession(QObject):
 
     # -- execution -----------------------------------------------------
 
-    def execute(self, code: str):
+    def execute(self, code: str, silent: bool = False):
         if not code.strip():
             return
         if not self.is_running():
             if self._cwd is None or not self.start(self._cwd):
                 return
         if self._busy:
-            self._queue.append(code)
+            self._queue.append((code, silent))
             self.info.emit(f"queued ({len(self._queue)} waiting)")
             return
-        self._send(code)
+        self._send(code, silent)
 
-    def _send(self, code: str):
+
+
+    def _send(self, code: str, silent: bool = False):
+        self._current_silent = silent
         self._counter += 1
         snippet = Path(self._tmpdir.name) / f"snippet_{self._counter:05d}.sh"
         snippet.write_text(code if code.endswith("\n") else code + "\n")
@@ -223,9 +228,11 @@ class BashSession(QObject):
                 self._cwd = Path(cwd)
                 self.cwdChanged.emit(cwd)
             self._set_busy(False)
-            self.commandFinished.emit(int(status) if status.lstrip("-").isdigit() else -1)
+            # in _on_ready_read, where commandFinished is emitted:
+            if not self._current_silent:
+                self.commandFinished.emit(int(status) if status.lstrip("-").isdigit() else -1)
             if self._queue:
-                self._send(self._queue.pop(0))
+                self._send(*self._queue.pop(0))
 
         # Flush everything except a tail that may be the beginning of a marker.
         keep = 0
@@ -526,8 +533,11 @@ class BashEditorWidget(QWidget):
         self._loaded_functions: dict[str, str] = {}   # name -> code in shell
         self._header_end = 0
         self.session.started.connect(self._on_shell_started)
+        self.ss_context = SubmitslurmContext(values={"-w": "wd"}, forced=set())
         self._create_ui()
         self._update_title()
+
+
 
     # -- UI ------------------------------------------------------------
 
@@ -574,6 +584,27 @@ class BashEditorWidget(QWidget):
         layout.addWidget(toolbar)
 
         splitter = QSplitter(Qt.Vertical, self)
+        ctx_row = QHBoxLayout()
+        self.ctx_enabled = QCheckBox("submitslurm context:")
+        self.ctx_enabled.setChecked(True)
+        ctx_row.addWidget(self.ctx_enabled)
+        self.ctx_edits, self.ctx_force = {}, {}
+        for key, label in (("-w", "-w"), ("-p", "-p"), ("-f", "-f")):
+            ctx_row.addWidget(QLabel(label))
+            edit = QLineEdit(self.ss_context.values.get(key, ""))
+            edit.setMaximumWidth(110)
+            edit.setPlaceholderText("(none)")
+            self.ctx_edits[key] = edit
+            ctx_row.addWidget(edit)
+            force = QCheckBox("force")
+            force.setToolTip("Override the option even if the call sets it")
+            self.ctx_force[key] = force
+            ctx_row.addWidget(force)
+            edit.editingFinished.connect(self._ctx_changed)
+            force.toggled.connect(self._ctx_changed)
+        self.ctx_enabled.toggled.connect(self._ctx_changed)
+        ctx_row.addStretch()
+        layout.addLayout(ctx_row)
 
         self.editor = CodeEditor(self)
         self.editor.document().modificationChanged.connect(lambda _m: self._update_title())
@@ -606,6 +637,18 @@ class BashEditorWidget(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter)
+
+    def _ctx_changed(self, *_):
+        self.ss_context.enabled = self.ctx_enabled.isChecked()
+        self.ss_context.values = {k: e.text() for k, e in self.ctx_edits.items()}
+        self.ss_context.forced = {k for k, c in self.ctx_force.items() if c.isChecked()}
+        self.apply_context()
+
+    def _update_context_label(self):
+        # keep the edit in sync when set_workspace() changed -w programmatically
+        edit = self.ctx_edits.get("-w")
+        if edit is not None and edit.text() != self.ss_context.values.get("-w", ""):
+            edit.setText(self.ss_context.values.get("-w", ""))
 
     def _action(self, container, text, slot, shortcut=None) -> QAction:
         action = QAction(text, self)
@@ -642,6 +685,26 @@ class BashEditorWidget(QWidget):
         self.file_label.setToolTip(str(self._file_path or ""))
 
     # -- project / file handling ---------------------------------------
+    def _on_shell_started(self):
+        self._loaded_functions.clear()
+        # Order matters: wrapper and context first, then user functions.
+        self.session.execute(WRAPPER + self.ss_context.to_bash(), silent=True)
+        self.sync_functions()
+
+    def apply_context(self):
+        """Push the current context into the running shell (no echo)."""
+        if self.session.is_running():
+            self.session.execute(self.ss_context.to_bash(), silent=True)
+        self._update_context_label()
+
+    def set_workspace(self, name: str | None):
+        """Called by the main window when a wd* directory is selected."""
+        if name:
+            self.ss_context.values["-w"] = name
+        else:
+            self.ss_context.values.pop("-w", None)
+        self.apply_context()
+
     def set_project(self, project_path: Path | None):
         self._project_path = Path(project_path) if project_path else None
         self.console.clear()

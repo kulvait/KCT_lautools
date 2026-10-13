@@ -643,6 +643,7 @@ class BrowserWindow(QMainWindow):
             return
 
         self.current_workspace = workspace
+        self.pipeline_editor.set_workspace(workspace.name)
 
         if persist:
             try:
