@@ -376,6 +376,7 @@ class ProjectManager:
                     "workspace_path_exists": path.is_dir(),
                     "wd_subfolder_name": wd_subfolder_name,
                     "path": path,
+                    "sample_count": self.count_workspace_samples(path) if path.is_dir() else None,
                 })
         return workspaces
 
@@ -670,6 +671,19 @@ class ProjectManager:
                 (project.id,),
             )
         return path
+
+    def remove_workspace(self, project, workspace_id) -> Path | None:
+        """Delete the wd directory (symlink targets untouched) and the DB record.
+
+        If the directory is already gone, only the record is removed.
+        Returns the removed directory, or None if there was none.
+        """
+        project, workspace = self._project_workspace(project, workspace_id)
+        removed = None
+        if os.path.lexists(workspace.path):
+            removed = self.remove_workspace_folder(project, workspace_id)
+        self.remove_workspace_entry(project, workspace_id)
+        return removed
 
     def list_workspaces(
         self, project: LaupyProject | int,
@@ -1271,3 +1285,15 @@ class ProjectManager:
                 (instance.id,),
             )
         return removed
+
+    @staticmethod
+    def count_workspace_samples(path: Path) -> int | None:
+        """Number of immediate subdirectories, or None if unreadable/missing.
+
+        Symlinks to directories count as samples. Only the top level is read.
+        """
+        try:
+            with os.scandir(path) as entries:
+                return sum(1 for entry in entries if entry.is_dir())
+        except OSError:
+            return None

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from lautools.browser.size_service_qt import SizeServiceBridge
+from lautools.browser.utils import open_terminal
 from lautools.size_service import (
     BEAMTIME_AREAS,
     SizeEvent,
@@ -168,7 +169,7 @@ class ProjectConfigDialog(QDialog):
     requests and redraws rows whenever a scan covering them reports back.
     """
 
-    WS_NAME, WS_SIZE, WS_UPDATED, WS_STATUS = range(4)
+    WS_NAME, WS_SAMPLES, WS_SIZE, WS_UPDATED, WS_STATUS = range(5)
 
     def __init__(
         self,
@@ -395,9 +396,9 @@ class ProjectConfigDialog(QDialog):
         box = QGroupBox("Workspaces (wd* directories on disk)")
         layout = QVBoxLayout(box)
 
-        self.workspace_table = QTableWidget(0, 4)
+        self.workspace_table = QTableWidget(0, 5)
         self.workspace_table.setHorizontalHeaderLabels(
-            ["Workspace", "Size", "Updated", "Status"]
+            ["Workspace", "Samples", "Size", "Updated", "Status"]
         )
         self.workspace_table.setEditTriggers(
             QAbstractItemView.NoEditTriggers
@@ -408,6 +409,7 @@ class ProjectConfigDialog(QDialog):
         self.workspace_table.verticalHeader().setVisible(False)
         header = self.workspace_table.horizontalHeader()
         header.setSectionResizeMode(self.WS_NAME, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.WS_SAMPLES, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(self.WS_SIZE, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(
             self.WS_UPDATED, QHeaderView.ResizeToContents
@@ -560,9 +562,11 @@ class ProjectConfigDialog(QDialog):
             workspace = info["workspace"]
             path = Path(workspace.path if workspace else info["path"])
             exists = bool(info["workspace_path_exists"])
+            samplecount = info.get("sample_count")
 
             values = [
                 workspace.name if workspace else path.name,
+                "-" if not exists else str(samplecount) if samplecount is not None else "?",
                 format_bytes(workspace.workspace_size_bytes)
                 if workspace else "Not counted",
                 format_time(workspace.workspace_size_bytes_timestamp)
@@ -603,22 +607,33 @@ class ProjectConfigDialog(QDialog):
         )
         create_custom = create_menu.addAction("Create wd with custom suffix…")
 
-        recreate = delete_folder = remove_entry = None
+        recreate = delete_folder = delete_all = remove_entry = terminal = None
         row = self.workspace_table.rowAt(pos.y())
         info = self._workspace_entries.get(row)
         workspace = info["workspace"] if info else None
+        ws_path = Path(workspace.path if workspace else info["path"]) if info else None
+
+        if ws_path is not None:
+            menu.addSeparator()
+            exists = os.path.lexists(ws_path)
+            terminal = menu.addAction("Open terminal in workspace")
+            terminal.setEnabled(ws_path.is_dir())
 
         if workspace is not None:
             menu.addSeparator()
-            path = Path(workspace.path)
-            if os.path.lexists(path):
+            if os.path.lexists(ws_path):
+                deletable = (
+                    not ws_path.is_symlink()
+                    and not self._is_busy(_resolve(ws_path))
+                )
                 delete_folder = menu.addAction(
                     "Delete workspace directory (keep DB record)…"
                 )
-                delete_folder.setEnabled(
-                    not path.is_symlink()
-                    and not self._is_busy(_resolve(path))
+                delete_folder.setEnabled(deletable)
+                delete_all = menu.addAction(
+                    "Delete workspace directory and DB record…"
                 )
+                delete_all.setEnabled(deletable)
             else:
                 recreate = menu.addAction(
                     "Recreate workspace using standard dialog…"
@@ -632,13 +647,19 @@ class ProjectConfigDialog(QDialog):
             self._create_workspace("wd")
         elif chosen is create_custom:
             self._create_workspace_with_suffix()
+        elif chosen is terminal:
+            open_terminal(
+                ws_path,
+                on_error=lambda e: self.refresh_status_label.setText(f"Error: {e}"),
+            )
         elif chosen is recreate:
             self._recreate_workspace(workspace)
         elif chosen is delete_folder:
             self._delete_workspace_folder(workspace)
+        elif chosen is delete_all:
+            self._delete_workspace_completely(workspace)
         elif chosen is remove_entry:
             self._remove_workspace_entry(workspace)
-
     def _create_workspace_with_suffix(self):
         suffix, accepted = QInputDialog.getText(
             self, "Create working directory", "Suffix for wd directory:",
@@ -677,6 +698,33 @@ class ProjectConfigDialog(QDialog):
         if not launched:
             self._creating_workspace = False
         self._refresh_workspace_view()
+
+    def _delete_workspace_completely(self, workspace):
+        if self._is_busy(_resolve(workspace.path)):
+            QMessageBox.warning(
+                self, "Workspace busy",
+                "Wait for the size scan to finish before deleting.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self, "Delete workspace and record",
+            f"Delete this directory AND its database record?\n\n"
+            f"{workspace.path}\n\n"
+            "Internal symlinks are removed, not their targets.\n"
+            "Project history is retained, but it can no longer refer to "
+            "this workspace.\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self.project_manager.remove_workspace(self.project, workspace.id)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Workspace deletion failed", str(exc))
+        finally:
+            self._refresh_workspace_view()
 
     def _workspace_creation_finished(self, path):
         self._creating_workspace = False
