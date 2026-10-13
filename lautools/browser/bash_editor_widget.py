@@ -451,6 +451,10 @@ class CodeEditor(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        if font.pointSize() > 0:
+            font.setPointSize(font.pointSize() + 1)
+        self.setFont(font)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self._area = _LineNumberArea(self)
@@ -545,7 +549,8 @@ class BashEditorWidget(QWidget):
 
     def _create_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
 
         toolbar = QToolBar(self)
         self._configure_toolbar(toolbar)
@@ -590,8 +595,8 @@ class BashEditorWidget(QWidget):
             QSizePolicy.Preferred, QSizePolicy.Fixed
         )
         ctx_row = QHBoxLayout(context_widget)
-        ctx_row.setContentsMargins(8, 6, 8, 6)
-        ctx_row.setSpacing(6)
+        ctx_row.setContentsMargins(5, 3, 5, 3)
+        ctx_row.setSpacing(2)
         self.ctx_enabled = QCheckBox("submitslurm context:")
         self.ctx_enabled.setChecked(self.ss_context.enabled)
         ctx_row.addWidget(self.ctx_enabled)
@@ -623,8 +628,8 @@ class BashEditorWidget(QWidget):
 
         console_widget = QWidget()
         console_layout = QVBoxLayout(console_widget)
-        console_layout.setContentsMargins(0, 0, 0, 0)
-        console_layout.setSpacing(5)
+        console_layout.setContentsMargins(2, 2, 2, 2)
+        console_layout.setSpacing(2)
         console_layout.addWidget(context_widget)
 
         shell_toolbar = QToolBar(self)
@@ -683,10 +688,13 @@ class BashEditorWidget(QWidget):
             edit.setText(self.ss_context.values.get("-w", ""))
 
     def _configure_toolbar(self, toolbar):
-        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setIconSize(QSize(16, 16))
         toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.layout().setContentsMargins(0, 0, 0, 0)
+        toolbar.layout().setSpacing(2)
 
     def _action(self, container, text, slot, shortcut=None) -> QAction:
         SP = QStyle.StandardPixmap
