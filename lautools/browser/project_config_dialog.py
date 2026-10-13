@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -19,6 +20,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -404,6 +407,10 @@ class ProjectConfigDialog(QDialog):
         )
         header.setSectionResizeMode(self.WS_STATUS, QHeaderView.Stretch)
         self.workspace_table.setMinimumHeight(160)
+        self.workspace_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.workspace_table.customContextMenuRequested.connect(
+            self._workspace_context_menu
+        )
 
         layout.addWidget(self.workspace_table)
         return box
@@ -532,27 +539,103 @@ class ProjectConfigDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _load_workspaces(self):
-        workspaces = self.project_manager.sync_workspaces_from_disk(
-            self.project
+        workspaces = self.project_manager.get_project_workspaces(
+            self.project,
+            register_disk_workspaces=True,
         )
 
         self.workspace_table.setRowCount(len(workspaces))
         self._workspace_rows.clear()
+        self._missing_workspaces.clear()
 
-        for row, workspace in enumerate(workspaces):
+        red = QBrush(QColor("#b00020"))
+
+        for row, info in enumerate(workspaces):
+            workspace = info["workspace"]
+            exists = bool(info["workspace_path_exists"])
+
+            if workspace is None:
+                continue
+
             path = _resolve(workspace.path)
-            self._workspace_rows[path] = (workspace.id, row)
+
             name_item = QTableWidgetItem(workspace.name)
             name_item.setToolTip(str(workspace.path))
             self.workspace_table.setItem(row, self.WS_NAME, name_item)
+
             for column in (self.WS_SIZE, self.WS_UPDATED, self.WS_STATUS):
                 self.workspace_table.setItem(row, column, QTableWidgetItem(""))
+
+            if exists:
+                self._workspace_rows[path] = (workspace.id, row)
+            else:
+                self._missing_workspaces[row] = workspace
+                for column in range(4):
+                    item = self.workspace_table.item(row, column)
+                    if item is not None:
+                        item.setForeground(red)
+                self.workspace_table.item(row, self.WS_STATUS).setText(
+                    "Missing on disk"
+                )
 
         if not workspaces:
             self.workspace_table.setRowCount(1)
             self.workspace_table.setItem(
                 0, self.WS_NAME, QTableWidgetItem("(No wd* directories)")
             )
+
+    def _workspace_context_menu(self, pos):
+        row = self.workspace_table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        workspace = self._missing_workspaces.get(row)
+        if workspace is None:
+            return
+
+        menu = QMenu(self)
+
+        create_action = menu.addAction("Create directory using standard wd creation dialog…")
+        remove_action = menu.addAction("Remove from database")
+
+        if self.create_workspace is None:
+            create_action.setEnabled(False)
+
+        chosen = menu.exec(self.workspace_table.viewport().mapToGlobal(pos))
+        if chosen is create_action:
+            self._create_missing_workspace(workspace)
+        elif chosen is remove_action:
+            self._remove_missing_workspace(workspace)
+
+    def _create_missing_workspace(self, workspace):
+        # Reuse the standard creation flow from the browser window if provided.
+        if self.create_workspace is None:
+            return
+
+        self.create_workspace(Path(workspace.path).name)
+        self._load_workspaces()
+        self._reload_sizes()
+        self._restore_active_state()
+        self._update_buttons()
+
+    def _remove_missing_workspace(self, workspace):
+        answer = QMessageBox.question(
+            self,
+            "Remove workspace",
+            (
+                f"Remove '{workspace.name}' from the database?\n\n"
+                f"Path: {workspace.path}\n\n"
+                "This does not delete anything on disk."
+            ),
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self.db.delete_workspace(workspace.id)
+        self._load_workspaces()
+        self._reload_sizes()
+        self._restore_active_state()
+        self._update_buttons()
 
     def _set_workspace_cell(self, row: int, column: int, text: str):
         item = self.workspace_table.item(row, column)

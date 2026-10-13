@@ -25,11 +25,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from lautools.browser.create_wd_dialogs import (
-    ProcessLogDialog,
-    SampleSelectionDialog,
-)
-from lautools.working_directory_creator import WDCreator
 from lautools.browser.settings_dialog import SettingsDialog
 from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
@@ -318,32 +313,13 @@ class BrowserWindow(QMainWindow):
         ``wd_subfolder_name``
             The workspace directory name on disk, or None if the workspace only
             exists in the database.
-    
-        """
-        if self.current_project is None:
-            return []
-        workspaces_in_db = self.db.list_workspaces_for_project(self.current_project.id)
-        wd_subfolder_names = self.current_on_disk_wd_dirs()
-        # Create collections for path comparison
-        workspaces_in_db_by_path = {ws.path.resolve(): ws for ws in workspaces_in_db}
-        wd_subfolder_names_by_path = { (self.current_project.path / name).resolve(): name for name in wd_subfolder_names }
-        all_paths = ( workspaces_in_db_by_path.keys() | wd_subfolder_names_by_path.keys() )
-        workspaces = []
-        for path in all_paths:
-            workspace = workspaces_in_db_by_path.get(path) # None if the path is not in workspaces_in_db_by_path
-            wd_subfolder_name = wd_subfolder_names_by_path.get(path) # None if the path is not in wd_subfolder_names_by_path
-            if workspace is None and register_disk_workspaces:
-                try:
-                    workspace = self.project_manager.register_workspace(self.current_project, path,)
-                except Exception:
-                    log.exception("Cannot register workspace directory: %s of project %s", path, self.current_project.path,)
-            workspaces.append({
-                "workspace": workspace,
-                "wd_subfolder_name": wd_subfolder_name,
-                "workspace_path_exists": path.is_dir()
-            })
-        return workspaces
 
+        ``path``
+            The resolved Path of the workspace directory.
+            When the workspace is None, Path is available without inspecting LaupyProject or LaupyWorkspace objects.
+        """
+        workspaces = self.project_manager.get_project_workspaces(self.current_project, register_disk_workspaces=register_disk_workspaces)
+        return workspaces
 
     #------------------------------------------------------------------
     # Workspace menu
@@ -876,14 +852,11 @@ class BrowserWindow(QMainWindow):
         suffix, accepted = QInputDialog.getText(
             self,
             "Create working directory",
-            "Suffix for wd directory:",
+            "Suffix for wd directory wd_suffix will be created:",
         )
-
         if not accepted:
             return
-
         suffix = suffix.strip()
-
         if not suffix:
             self.status_label.setText(
                 "Empty suffix, nothing created"
@@ -894,130 +867,7 @@ class BrowserWindow(QMainWindow):
         self._create_named_working_directory(directory_name)
 
     def _create_named_working_directory(self, directory_name: str):
-        if self.current_project is None:
-            self.status_label.setText("No active project")
-            return
-        project_path = self.current_project.path
-        workspace_path = project_path / directory_name
-        if workspace_path.exists():
-            message = (
-                f"Working directory already exists:\n"
-                f"{workspace_path}"
-            )
-            log.warning(message)
-            self.status_label.setText(message)
-            return
-
-        raw_dir = project_path / "raw"
-
-        if not raw_dir.is_dir():
-            QMessageBox.critical(
-                self,
-                "No raw directory",
-                f"{raw_dir} does not exist.",
-            )
-            return
-
-        self.status_label.setText(f"Listing samples in {raw_dir}...")
-        wdc = None
-        try:
-            wdc = WDCreator(self.current_project, db=self.db)
-            samples = wdc.getSampleList(raw_dir)
-        except (RuntimeError, ValueError) as exc:
-            log.error("Sample listing failed: %s", exc)
-            self.status_label.setText("Sample listing failed")
-            return
-
-        if not samples:
-            QMessageBox.information(self, "No samples found", f"No samples found in {raw_dir}.")
-            self.status_label.setText("No samples found")
-            return
-
-        dialog = SampleSelectionDialog(
-            samples,
-            directory_name,
-            parent=self,
-        )
-
-        if dialog.exec() != QDialog.Accepted:
-            self.status_label.setText(
-                "Working directory creation cancelled"
-            )
-            return
-
-        selected_samples = dialog.selected_samples()
-
-        if not selected_samples:
-            self.status_label.setText(
-                "No samples selected, nothing created"
-            )
-            return
-
-        try:
-            workspace_path.mkdir(
-                parents=False,
-                exist_ok=False,
-            )
-        except OSError as exc:
-            message = (f"Failed to create working directory {workspace_path}: {exc}")
-            log.error(message)
-            self.status_label.setText(message)
-            return
-
-        self._run_create_process(
-            wdc,
-            raw_dir,
-            workspace_path,
-            selected_samples,
-        )
-
-    def _run_create_process(self, creator, raw_dir, workspace_path, samples):
-        try:
-            program, args = creator.getCreationCommand(
-                workspace_path,
-                samples,
-                raw_dir=raw_dir,
-            )
-        except ValueError as exc:
-            self.status_label.setText(f"Cannot create working directory: {exc}")
-            QMessageBox.critical(
-                self,
-                "Working directory creation failed",
-                str(exc),
-            )
-            return
-        def on_finished(success):
-            if success:
-                self.status_label.setText(
-                    f"Created working directory "
-                    f"{workspace_path.name} with "
-                    f"{len(samples)} samples"
-                )
-            else:
-                self.status_label.setText(
-                    f"Errors while populating "
-                    f"{workspace_path.name}"
-                )
-
-            # The directory now exists on disk. Register it and select it.
-            self.select_working_directory(workspace_path)
-
-        self.status_label.setText(
-            f"Populating {workspace_path.name}..."
-        )
-
-        log_file = workspace_path / "createStructure.log"
-
-        self._create_wd_log = ProcessLogDialog(
-            f"Creating {workspace_path.name}",
-            program,
-            args,
-            on_finished=on_finished,
-            parent=self,
-            log_file=log_file,
-        )
-        self._create_wd_log.setModal(False)
-        self._create_wd_log.show()
+        self.project_manager.create_named_working_directory(self.current_project, directory_name, parent=self, on_error=self.status_label.setText, on_created=self.select_working_directory)
 
     # ------------------------------------------------------------------
     # Context menu

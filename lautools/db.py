@@ -730,6 +730,19 @@ class LaupyDB:
         ).fetchone()
         return self._row_to_workspace(row)
 
+    def delete_workspace(self, workspace_id: int) -> None:
+        # Keep history rows, but detach them from the deleted workspace.
+        # Remove this UPDATE if the FK is already ON DELETE SET NULL / CASCADE.
+        self.connection.execute(
+            "UPDATE laupy_history SET workspace_id = NULL WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        self.connection.execute(
+            "DELETE FROM laupy_project_workspace WHERE id = ?",
+            (workspace_id,),
+        )
+        self.connection.commit()
+
     def get_workspace(self, workspace_id: int) -> LaupyProjectWorkspace | None:
         row = self.connection.execute(
             "SELECT * FROM laupy_project_workspace WHERE id = ?",

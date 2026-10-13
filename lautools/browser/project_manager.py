@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
@@ -11,6 +12,11 @@ import shutil
 import stat
 
 from lautools.beamtime_scanner import (BeamtimeCandidate, inspect_candidate, parse_metadata_text)
+from lautools.working_directory_creator import WDCreator
+from lautools.browser.create_wd_dialogs import (
+    ProcessLogDialog,
+    SampleSelectionDialog,
+)
 from lautools.db import (
     Beamtime,
     BeamtimeStorage,
@@ -21,11 +27,27 @@ from lautools.db import (
     LaupyProjectToRecipeInstance,
 )
 
+from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
+
 BEAMTIME_LINK_NAMES = ("raw", "processed", "scratch_cc", "shared")
 
 
 ProgressCallback = Callable[[str], None]
 
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+
+if not log.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s:%(lineno)d - %(levelname)s : %(message)s",
+        datefmt="%d.%m.%Y %H:%M:%S",
+    )    
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+
+log.propagate = False
 
 def _now() -> datetime:
     return datetime.now().replace(microsecond=0)
@@ -305,6 +327,152 @@ class ProjectManager:
             ),
             gpfs_links=self.inspect_gpfs_links(project, linked),
         )
+
+    def get_project_workspaces(self, project: LaupyProject | int, register_disk_workspaces: bool = True) -> list[dict[str, object]]:
+        """  
+        Return workspace information for the current project. Include wokspaces in the database and project subfolders starting with "wd" that are currently on disk.
+        
+        If ``register_disk_workspaces`` is True, wd subfolders that are not yet registered in the database will be registered and included in the returned list.
+    
+        Each returned dictionary contains:
+    
+        ``workspace``
+            The database workspace object, or None if the directory only exists
+            on disk.
+
+        ``workspace_path_exists``
+            True if the workspace path exists on disk.
+    
+        ``wd_subfolder_name``
+            The workspace directory name on disk, or None if the workspace only
+            exists in the database.
+
+        ``path``
+            The resolved Path of the workspace directory.
+            When the workspace is None, Path is available without inspecting LaupyProject or LaupyWorkspace objects.
+        """
+
+        project = self._project(project)
+        try:
+            wd_dirs = sorted((entry for entry in project.path.iterdir() if entry.is_dir() and entry.name.startswith("wd")), key=lambda path: path.name.lower())
+        except OSError:
+            wd_dirs = []
+        workspaces_in_db = self.db.list_workspaces_for_project(project.id)
+        workspaces_in_db_by_path = {ws.path.resolve(): ws for ws in workspaces_in_db}
+        wd_dirs_by_path = {path.resolve(): path.name for path in wd_dirs}
+        all_paths = (workspaces_in_db_by_path.keys() | wd_dirs_by_path.keys())
+        workspaces: list[dict[str, object]] = []
+        for path in sorted(all_paths, key=lambda path: path.name.lower()):
+            workspace = workspaces_in_db_by_path.get(path)
+            wd_subfolder_name = wd_dirs_by_path.get(path)
+            if workspace is None and register_disk_workspaces and path.is_dir():
+                try:
+                    workspace = self.register_workspace(project, path)
+                except (OSError, ValueError, sqlite3.Error):
+                    log.warning(f"Failed to register workspace {path} for project {project.name}: {e}")
+                    pass
+            workspaces.append({
+                    "workspace": workspace,
+                    "workspace_path_exists": path.is_dir(),
+                    "wd_subfolder_name": wd_subfolder_name,
+                    "path": path,
+                })
+        return workspaces
+
+    def create_named_working_directory(
+        self,
+        project: LaupyProject,
+        directory_name: str,
+        parent: QWidget | None = None,
+        on_error: Callable[[str], None] | None = None,
+        on_created: Callable[[Path], None] | None = None
+    ) -> bool:
+        def processOutputMessage(message: str) -> None:
+            if on_error:
+                on_error(message)
+        project_path = project.path
+        workspace_path = project_path / directory_name
+        raw_dir = project_path / "raw"
+        if workspace_path.exists():
+            message = f"Working directory already exists:\n{workspace_path}"
+            log.warning(message)
+            processOutputMessage(message)
+            return False
+        if not raw_dir.is_dir():
+            message = f"{raw_dir} does not exist."
+            QMessageBox.critical(parent, "No raw directory", message)
+            processOutputMessage(message)
+            return False
+        processOutputMessage(f"Listing samples in {raw_dir}...")
+        try:
+            wdc = WDCreator(project, db=self.db)
+            samples = wdc.getSampleList(raw_dir)
+        except (RuntimeError, ValueError) as exc:
+            log.error("Sample listing failed: %s", exc)
+            processOutputMessage("Sample listing failed")
+            return False
+        if not samples:
+            message = f"No samples found in {raw_dir}."
+            QMessageBox.information(parent, "No samples found", message)
+            processOutputMessage("No samples found")
+            return False
+        dialog = SampleSelectionDialog(samples, directory_name, parent=parent)
+        if dialog.exec() != QDialog.Accepted:
+            processOutputMessage("Working directory creation cancelled")
+            return False
+        selected_samples = dialog.selected_samples()
+        if not selected_samples:
+            processOutputMessage("No samples selected, nothing created")
+            return False
+        try:
+            workspace_path.mkdir(exist_ok=False)
+        except OSError as exc:
+            message = f"Failed to create working directory {workspace_path}: {exc}"
+            log.error(message)
+            processOutputMessage(message)
+            return False
+        self._run_create_process(wdc, raw_dir, workspace_path, selected_samples, parent=parent, on_error=on_error, on_created=on_created)
+        return True
+
+    def _run_create_process(self, creator, raw_dir, workspace_path, samples, parent=None, on_error: Callable[[str], None] | None = None, on_created: Callable[[Path], None] | None = None) -> None:
+        def processOutputMessage(message: str) -> None:
+            if on_error:
+                on_error(message)
+        try: 
+            program, args = creator.getCreationCommand(
+                workspace_path,
+                samples,
+                raw_dir=raw_dir,
+            )    
+        except ValueError as exc: 
+            msg = f"Failed to prepare working directory {workspace_path}: {exc}"
+            log.error(msg)
+            processOutputMessage(msg)
+            return
+        def on_finished(success):
+            if success:
+                msg = f"Created working directory {workspace_path.name} with {len(samples)} samples"
+            else:
+                msg = f"Errors while populating {workspace_path.name}"
+            processOutputMessage(msg)
+            # The directory now exists on disk. Use on_created callback to update the database and GUI.
+            if on_created:
+                on_created(workspace_path)
+        msg = f"Creating working directory {workspace_path.name} with {len(samples)} samples..."
+        log.info(msg)
+        processOutputMessage(msg)
+        log_file = workspace_path / "createStructure.log"
+        self._create_wd_log = ProcessLogDialog(
+            f"Creating {workspace_path.name}",
+            program,
+            args,
+            on_finished=on_finished,
+            parent=parent,
+            log_file=log_file,
+        )
+        self._create_wd_log.setModal(False)
+        self._create_wd_log.show()
+
 
     def inspect_gpfs_links(
         self,
