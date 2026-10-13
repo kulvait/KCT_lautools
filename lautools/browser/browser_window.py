@@ -30,6 +30,7 @@ from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
 from lautools.browser.beamtime_list_dialog import BeamtimeListDialog
 from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
+from lautools.browser.bash_editor_widget import BashEditorWidget
 from lautools.browser.project_manager import ProjectManager
 from lautools.browser.new_project_from_recipe_dialog import (NewProjectFromRecipeDialog,)
 from lautools.browser.utils import (
@@ -210,6 +211,7 @@ class BrowserWindow(QMainWindow):
             if (self.current_project.path / "sbatch").is_dir():
                 self._add_open_action(self.project_menu, "Open terminal in sbatch", (self.current_project.path / "sbatch").resolve(), open_terminal)
             if (self.current_project.path / "INFO").is_file():
+                self.project_menu.addAction("Open INFO in Pipeline tab").triggered.connect(self._open_info_in_pipeline_tab)
                 self.project_menu.addAction("Open INFO in vim").triggered.connect(lambda: open_files_vim([str(self.current_project.path / "INFO")], on_error=on_error))
                 self.project_menu.addAction("Open INFO in mousepad").triggered.connect(lambda: open_files_mousepad([str(self.current_project.path / "INFO")], on_error=on_error))
             else:
@@ -557,22 +559,10 @@ class BrowserWindow(QMainWindow):
         return widget
 
     def _create_pipeline_tab(self):
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        self.pipeline_tab_label = QLabel(
-            "Pipeline\n\n"
-            "Pipeline information for the selected working directory "
-            "will appear here."
-        )
-        self.pipeline_tab_label.setAlignment(
-            Qt.AlignTop | Qt.AlignLeft
-        )
-
-        layout.addWidget(self.pipeline_tab_label)
-        layout.addStretch()
-
-        return widget
+        self.pipeline_editor = BashEditorWidget(parent=self)
+        # status_label is created later in _create_status_bar, so resolve lazily.
+        self.pipeline_editor.statusMessage.connect(lambda message: self.status_label.setText(message))
+        return self.pipeline_editor
 
     def _create_status_tab(self):
         widget = QWidget()
@@ -582,6 +572,14 @@ class BrowserWindow(QMainWindow):
         layout.addWidget(self.pipeline_status_tree)
 
         return widget
+
+    def _open_info_in_pipeline_tab(self):
+        if self.current_project is None:
+            return
+        info = self.current_project.path / "INFO"
+        if info.is_file() and self.pipeline_editor.maybe_save():
+            self.pipeline_editor.open_file(info)
+            self.tabs.setCurrentWidget(self.pipeline_tab)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -1376,6 +1374,10 @@ class BrowserWindow(QMainWindow):
         self.status_label.setText(f"Updated beamtime: {label}")
 
     def closeEvent(self, event):
+        if not self.pipeline_editor.maybe_save():
+            event.ignore()
+            return
+        self.pipeline_editor.shutdown()
         self.size_bridge.detach()
         self.size_service.stop()
         super().closeEvent(event)
@@ -1485,6 +1487,8 @@ class BrowserWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _activate_project(self, project):
+        if not self.pipeline_editor.maybe_save():
+            return
         self.current_project = project
         self.current_workspace = None
 
@@ -1585,6 +1589,12 @@ class BrowserWindow(QMainWindow):
         self._reset_tab_texts()
         self.refresh_locations()
         self._update_action_states()
+        self.pipeline_editor.set_project(
+            self.current_project.path if self.current_project else None
+        )
+        if (self.current_project is not None
+                and (self.current_project.path / "INFO").is_file()):
+            self.tabs.setCurrentWidget(self.pipeline_tab)
 
     # ------------------------------------------------------------------
     # Project open / close
@@ -1611,6 +1621,8 @@ class BrowserWindow(QMainWindow):
     open_location = open_project
 
     def close_project(self):
+        if self.pipeline_editor.maybe_save():
+            return
         try:
             # A null project/workspace row is intentional and represents
             # that the application was closed without an active project.
@@ -1628,6 +1640,7 @@ class BrowserWindow(QMainWindow):
 
         self.tabs.setCurrentIndex(0)
         self._reset_tab_texts()
+        self.pipeline_editor.set_project(None)
         self._update_current_project_ui()
 
     # Compatibility alias for existing signal connections.
