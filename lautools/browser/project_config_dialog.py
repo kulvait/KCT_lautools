@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import sqlite3
+
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -189,6 +193,9 @@ class ProjectConfigDialog(QDialog):
         self._original_descriptions: dict[int, str] = {}
         self._area_paths: dict[str, Path] = {}
         self._workspace_rows: dict[Path, tuple[int, int]] = {}
+        self._missing_workspaces = {}
+        self._workspace_entries = {}
+        self._creating_workspace = False
         # Requested root path -> "queued" | "running".
         self._active: dict[Path, str] = {}
 
@@ -539,103 +546,196 @@ class ProjectConfigDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _load_workspaces(self):
-        workspaces = self.project_manager.get_project_workspaces(
-            self.project,
-            register_disk_workspaces=True,
+        entries = self.project_manager.get_project_workspaces(
+            self.project, register_disk_workspaces=True,
         )
-
-        self.workspace_table.setRowCount(len(workspaces))
+        self.workspace_table.clearContents()
+        self.workspace_table.setRowCount(len(entries))
         self._workspace_rows.clear()
         self._missing_workspaces.clear()
+        self._workspace_entries.clear()
 
-        red = QBrush(QColor("#b00020"))
-
-        for row, info in enumerate(workspaces):
+        for row, info in enumerate(entries):
+            self._workspace_entries[row] = info
             workspace = info["workspace"]
+            path = Path(workspace.path if workspace else info["path"])
             exists = bool(info["workspace_path_exists"])
 
+            values = [
+                workspace.name if workspace else path.name,
+                format_bytes(workspace.workspace_size_bytes)
+                if workspace else "Not counted",
+                format_time(workspace.workspace_size_bytes_timestamp)
+                if workspace else "—",
+                "" if exists else "Missing on disk",
+            ]
             if workspace is None:
-                continue
+                values[3] = "Not registered in database"
 
-            path = _resolve(workspace.path)
+            for column, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setToolTip(str(path))
+                if not exists:
+                    item.setForeground(QBrush(QColor("#b00020")))
+                self.workspace_table.setItem(row, column, item)
 
-            name_item = QTableWidgetItem(workspace.name)
-            name_item.setToolTip(str(workspace.path))
-            self.workspace_table.setItem(row, self.WS_NAME, name_item)
+            if workspace is not None:
+                if exists:
+                    self._workspace_rows[_resolve(path)] = (workspace.id, row)
+                else:
+                    self._missing_workspaces[row] = workspace
 
-            for column in (self.WS_SIZE, self.WS_UPDATED, self.WS_STATUS):
-                self.workspace_table.setItem(row, column, QTableWidgetItem(""))
-
-            if exists:
-                self._workspace_rows[path] = (workspace.id, row)
-            else:
-                self._missing_workspaces[row] = workspace
-                for column in range(4):
-                    item = self.workspace_table.item(row, column)
-                    if item is not None:
-                        item.setForeground(red)
-                self.workspace_table.item(row, self.WS_STATUS).setText(
-                    "Missing on disk"
-                )
-
-        if not workspaces:
+        if not entries:
             self.workspace_table.setRowCount(1)
             self.workspace_table.setItem(
-                0, self.WS_NAME, QTableWidgetItem("(No wd* directories)")
+                0, self.WS_NAME, QTableWidgetItem("(No workspaces)")
             )
 
     def _workspace_context_menu(self, pos):
-        row = self.workspace_table.rowAt(pos.y())
-        if row < 0:
-            return
-
-        workspace = self._missing_workspaces.get(row)
-        if workspace is None:
+        if self._creating_workspace:
             return
 
         menu = QMenu(self)
+        create_menu = menu.addMenu("Create workspace")
+        create_wd = create_menu.addAction("Create wd…")
+        create_wd.setEnabled(
+            not os.path.lexists(self.project.path / "wd")
+        )
+        create_custom = create_menu.addAction("Create wd with custom suffix…")
 
-        create_action = menu.addAction("Create directory using standard wd creation dialog…")
-        remove_action = menu.addAction("Remove from database")
+        recreate = delete_folder = remove_entry = None
+        row = self.workspace_table.rowAt(pos.y())
+        info = self._workspace_entries.get(row)
+        workspace = info["workspace"] if info else None
 
-        if self.create_workspace is None:
-            create_action.setEnabled(False)
+        if workspace is not None:
+            menu.addSeparator()
+            path = Path(workspace.path)
+            if os.path.lexists(path):
+                delete_folder = menu.addAction(
+                    "Delete workspace directory (keep DB record)…"
+                )
+                delete_folder.setEnabled(
+                    not path.is_symlink()
+                    and not self._is_busy(_resolve(path))
+                )
+            else:
+                recreate = menu.addAction(
+                    "Recreate workspace using standard dialog…"
+                )
+                remove_entry = menu.addAction("Remove from database…")
 
         chosen = menu.exec(self.workspace_table.viewport().mapToGlobal(pos))
-        if chosen is create_action:
-            self._create_missing_workspace(workspace)
-        elif chosen is remove_action:
-            self._remove_missing_workspace(workspace)
+        if chosen is None:
+            return
+        if chosen is create_wd:
+            self._create_workspace("wd")
+        elif chosen is create_custom:
+            self._create_workspace_with_suffix()
+        elif chosen is recreate:
+            self._recreate_workspace(workspace)
+        elif chosen is delete_folder:
+            self._delete_workspace_folder(workspace)
+        elif chosen is remove_entry:
+            self._remove_workspace_entry(workspace)
 
-    def _create_missing_workspace(self, workspace):
-        # Reuse the standard creation flow from the browser window if provided.
-        if self.create_workspace is None:
+    def _create_workspace_with_suffix(self):
+        suffix, accepted = QInputDialog.getText(
+            self, "Create working directory", "Suffix for wd directory:",
+        )
+        if accepted and suffix.strip():
+            self._create_workspace(
+                f"wd_{suffix.strip().replace(' ', '_')}"
+            )
+
+    def _recreate_workspace(self, workspace):
+        path = Path(workspace.path)
+        if path.parent.resolve() != self.project.path.resolve():
+            QMessageBox.warning(
+                self, "Cannot recreate workspace",
+                "Workspace is not an immediate child of this project.",
+            )
+            return
+        self._create_workspace(path.name)
+
+    def _create_workspace(self, directory_name):
+        self._creating_workspace = True
+        try:
+            launched = self.project_manager.create_named_working_directory(
+                self.project,
+                directory_name,
+                parent=self,
+                on_error=self.refresh_status_label.setText,
+                on_created=self._workspace_creation_finished,
+            )
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            self._creating_workspace = False
+            QMessageBox.critical(self, "Workspace creation failed", str(exc))
+            self._refresh_workspace_view()
             return
 
-        self.create_workspace(Path(workspace.path).name)
-        self._load_workspaces()
-        self._reload_sizes()
-        self._restore_active_state()
-        self._update_buttons()
+        if not launched:
+            self._creating_workspace = False
+        self._refresh_workspace_view()
 
-    def _remove_missing_workspace(self, workspace):
+    def _workspace_creation_finished(self, path):
+        self._creating_workspace = False
+        # Also refresh after failed population: its directory may still exist.
+        self._refresh_workspace_view()
+
+    def _delete_workspace_folder(self, workspace):
+        if self._is_busy(_resolve(workspace.path)):
+            QMessageBox.warning(
+                self, "Workspace busy",
+                "Wait for the size scan to finish before deleting.",
+            )
+            return
+
         answer = QMessageBox.question(
-            self,
-            "Remove workspace",
-            (
-                f"Remove '{workspace.name}' from the database?\n\n"
-                f"Path: {workspace.path}\n\n"
-                "This does not delete anything on disk."
-            ),
+            self, "Delete workspace directory",
+            f"Delete this directory and its contents?\n\n{workspace.path}\n\n"
+            "Internal symlinks are removed, not their targets.\n"
+            "The database record is kept so you can recreate it.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
             return
+        try:
+            self.project_manager.remove_workspace_folder(
+                self.project, workspace.id,
+            )
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Workspace deletion failed", str(exc))
+        finally:
+            self._refresh_workspace_view()
 
-        self.db.delete_workspace(workspace.id)
+    def _remove_workspace_entry(self, workspace):
+        answer = QMessageBox.question(
+            self, "Remove workspace record",
+            f"Remove '{workspace.name}' from the database?\n\n"
+            "No files are deleted. Project history is retained.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self.project_manager.remove_workspace_entry(
+                self.project, workspace.id,
+            )
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Cannot remove workspace", str(exc))
+        finally:
+            self._refresh_workspace_view()
+
+    def _refresh_workspace_view(self):
         self._load_workspaces()
         self._reload_sizes()
+        self._update_disk_state()
         self._restore_active_state()
         self._update_buttons()
+
 
     def _set_workspace_cell(self, row: int, column: int, text: str):
         item = self.workspace_table.item(row, column)
@@ -1009,10 +1109,16 @@ class ProjectConfigDialog(QDialog):
             self.db.connection.commit()
 
     def accept(self):
+        if self._creating_workspace:
+            self.refresh_status_label.setText("Finish creating the workspace before closing the dialog")
+            return
         self._save_beamtime_descriptions()
         super().accept()
 
     def done(self, result: int):
+        if self._creating_workspace:
+            self.refresh_status_label.setText("Finish creating the workspace before closing the dialog")
+            return
         # Stop listening; scans keep running and still update the database.
         if self._bridge is not None:
             self._bridge.detach()

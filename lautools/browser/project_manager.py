@@ -369,7 +369,7 @@ class ProjectManager:
                 try:
                     workspace = self.register_workspace(project, path)
                 except (OSError, ValueError, sqlite3.Error):
-                    log.warning(f"Failed to register workspace {path} for project {project.name}: {e}")
+                    log.error(f"Failed to register workspace {path} for project {project.name}: {e}")
                     pass
             workspaces.append({
                     "workspace": workspace,
@@ -393,7 +393,7 @@ class ProjectManager:
         project_path = project.path
         workspace_path = project_path / directory_name
         raw_dir = project_path / "raw"
-        if workspace_path.exists():
+        if os.path.lexists(workspace_path):
             message = f"Working directory already exists:\n{workspace_path}"
             log.warning(message)
             processOutputMessage(message)
@@ -431,10 +431,9 @@ class ProjectManager:
             log.error(message)
             processOutputMessage(message)
             return False
-        self._run_create_process(wdc, raw_dir, workspace_path, selected_samples, parent=parent, on_error=on_error, on_created=on_created)
-        return True
+        return self._run_create_process(wdc, raw_dir, workspace_path, selected_samples, parent=parent, on_error=on_error, on_created=on_created)
 
-    def _run_create_process(self, creator, raw_dir, workspace_path, samples, parent=None, on_error: Callable[[str], None] | None = None, on_created: Callable[[Path], None] | None = None) -> None:
+    def _run_create_process(self, creator, raw_dir, workspace_path, samples, parent=None, on_error: Callable[[str], None] | None = None, on_created: Callable[[Path], None] | None = None) -> bool:
         def processOutputMessage(message: str) -> None:
             if on_error:
                 on_error(message)
@@ -472,6 +471,7 @@ class ProjectManager:
         )
         self._create_wd_log.setModal(False)
         self._create_wd_log.show()
+        return True
 
 
     def inspect_gpfs_links(
@@ -590,6 +590,86 @@ class ProjectManager:
         )
         self.db.connection.commit()
         return workspace
+
+    def _project_workspace(self, project, workspace_id):
+        project = self._project(project)
+        workspace = self.db.get_workspace(workspace_id)
+        if workspace is None or workspace.project_id != project.id:
+            raise ValueError("Workspace does not belong to this project")
+        return project, workspace
+
+    def remove_workspace_entry(self, project, workspace_id) -> None:
+        """Remove a missing workspace from the DB; retain project history."""
+        _, workspace = self._project_workspace(project, workspace_id)
+        if os.path.lexists(workspace.path):
+            raise ValueError(
+                "The workspace path still exists. Delete its directory first."
+            )
+
+        with self.db.transaction():
+            self.db.connection.execute(
+                "UPDATE lautools_app_history SET workspace_id = NULL "
+                "WHERE workspace_id = ? AND project_id = ?",
+                (workspace.id, workspace.project_id),
+            )
+            self.db.connection.execute(
+                "DELETE FROM laupy_project_workspace "
+                "WHERE id = ? AND project_id = ?",
+                (workspace.id, workspace.project_id),
+            )
+
+    def remove_workspace_folder(self, project, workspace_id) -> Path:
+        """Delete an immediate wd* directory, never symlink targets.
+
+        Keep the DB record so the workspace can be recreated.
+        Fail closed on platforms without fd-based safe rmtree.
+        """
+        project, workspace = self._project_workspace(project, workspace_id)
+        root = project.path.resolve(strict=True)
+
+        # Do not resolve the final component: it could be a symlink.
+        path = Path(os.path.abspath(workspace.path))
+        if (
+            path.parent.resolve(strict=True) != root
+            or not path.name.startswith("wd")
+        ):
+            raise ValueError("Workspace must be an immediate wd* project child")
+
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise RuntimeError(
+                "Safe workspace deletion is unavailable on this platform"
+            )
+
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = os.open(root, flags)
+        try:
+            entry = os.stat(
+                path.name, dir_fd=root_fd, follow_symlinks=False
+            )
+            if not stat.S_ISDIR(entry.st_mode):
+                raise ValueError(
+                    "Workspace root must be a real directory, not a symlink"
+                )
+            shutil.rmtree(path.name, dir_fd=root_fd)
+        finally:
+            os.close(root_fd)
+
+        with self.db.transaction():
+            self.db.connection.execute(
+                "UPDATE laupy_project_workspace "
+                "SET workspace_size_bytes = NULL, "
+                "workspace_size_bytes_timestamp = NULL, last_inspected = NULL "
+                "WHERE id = ?",
+                (workspace.id,),
+            )
+            self.db.connection.execute(
+                "UPDATE laupy_project "
+                "SET project_size_bytes = NULL, "
+                "project_size_bytes_timestamp = NULL, last_inspected = NULL "
+                "WHERE id = ?",
+                (project.id,),
+            )
+        return path
 
     def list_workspaces(
         self, project: LaupyProject | int,

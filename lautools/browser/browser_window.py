@@ -794,7 +794,20 @@ class BrowserWindow(QMainWindow):
             parent=self,
         )
 
-        if dialog.exec() != QDialog.Accepted:
+        result = dialog.exec()
+        # Update possible changes
+        if self.current_workspace is not None:
+            workspace = self.db.get_workspace(self.current_workspace.id)
+            if workspace is None or not workspace.path.is_dir():
+                self.current_workspace = None
+                self._reset_tab_texts()
+            else:
+                self.current_workspace = workspace
+
+        self.refresh_locations()
+        self._update_current_project_ui()
+
+        if result != QDialog.Accepted:
             return
 
         new_name = dialog.project_name()
