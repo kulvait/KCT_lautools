@@ -34,6 +34,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
+    QIcon,
     QKeySequence,
     QPainter,
     QSyntaxHighlighter,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QSizePolicy,
     QSplitter,
+    QStyle,
     QTextEdit,
     QToolBar,
     QVBoxLayout,
@@ -546,6 +548,7 @@ class BashEditorWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         toolbar = QToolBar(self)
+        self._configure_toolbar(toolbar)
         self.open_action = self._action(toolbar, "Open…", self.open_dialog)
         self.save_action = self._action(toolbar, "Save", self.save, QKeySequence.Save)
         self._action(toolbar, "Save As…", self.save_as)
@@ -567,26 +570,30 @@ class BashEditorWidget(QWidget):
         toolbar.addWidget(self.functions_label)
         # Ctrl+Return: selection if present, otherwise current line.
         self._action(self, "Run line/selection", self.run_line_or_selection, "Ctrl+Return")
-        toolbar.addSeparator()
-        self.interrupt_action = self._action(toolbar, "■ Interrupt", self.session.interrupt)
-        self.interrupt_action.setEnabled(False)
-        self._action(toolbar, "↻ Restart shell", self.session.restart)
-        self._action(toolbar, "Clear", lambda: self.console.clear())
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         toolbar.addWidget(spacer)
         self.file_label = QLabel()
-        self.cwd_label = QLabel("cwd: –")
         toolbar.addWidget(self.file_label)
-        toolbar.addWidget(QLabel("   "))
-        toolbar.addWidget(self.cwd_label)
         layout.addWidget(toolbar)
 
         splitter = QSplitter(Qt.Vertical, self)
-        ctx_row = QHBoxLayout()
+        self.splitter = splitter
+        splitter.setHandleWidth(8)
+        splitter.setChildrenCollapsible(False)
+
+        # Context belongs to the console pane, not the outer layout.
+        context_widget = QWidget()
+        context_widget.setObjectName("bashContextBar")
+        context_widget.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Fixed
+        )
+        ctx_row = QHBoxLayout(context_widget)
+        ctx_row.setContentsMargins(8, 6, 8, 6)
+        ctx_row.setSpacing(6)
         self.ctx_enabled = QCheckBox("submitslurm context:")
-        self.ctx_enabled.setChecked(True)
+        self.ctx_enabled.setChecked(self.ss_context.enabled)
         ctx_row.addWidget(self.ctx_enabled)
         self.ctx_edits, self.ctx_force = {}, {}
         for key, label in (("-w", "-w"), ("-p", "-p"), ("-f", "-f")):
@@ -604,7 +611,6 @@ class BashEditorWidget(QWidget):
             force.toggled.connect(self._ctx_changed)
         self.ctx_enabled.toggled.connect(self._ctx_changed)
         ctx_row.addStretch()
-        layout.addLayout(ctx_row)
 
         self.editor = CodeEditor(self)
         self.editor.document().modificationChanged.connect(lambda _m: self._update_title())
@@ -618,11 +624,37 @@ class BashEditorWidget(QWidget):
         console_widget = QWidget()
         console_layout = QVBoxLayout(console_widget)
         console_layout.setContentsMargins(0, 0, 0, 0)
+        console_layout.setSpacing(5)
+        console_layout.addWidget(context_widget)
+
+        shell_toolbar = QToolBar(self)
+        self._configure_toolbar(shell_toolbar)
+        self.interrupt_action = self._action(
+            shell_toolbar, "■ Interrupt", self.session.interrupt
+        )
+        self.interrupt_action.setEnabled(False)
+        self._action(
+            shell_toolbar, "↻ Restart shell", self.session.restart
+        )
+        self._action(
+            shell_toolbar, "Clear", lambda: self.console.clear()
+        )
+
+        shell_spacer = QWidget()
+        shell_spacer.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
+        shell_toolbar.addWidget(shell_spacer)
+        self.cwd_label = QLabel("cwd: –")
+        self.cwd_label.setTextFormat(Qt.PlainText)
+        self.cwd_label.setMinimumWidth(0)
+        shell_toolbar.addWidget(self.cwd_label)
+        console_layout.addWidget(shell_toolbar)
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         self.console.setMaximumBlockCount(20000)
-        console_layout.addWidget(self.console)
+        console_layout.addWidget(self.console, stretch=1)
 
         input_row = QHBoxLayout()
         input_row.addWidget(QLabel("$"))
@@ -650,12 +682,81 @@ class BashEditorWidget(QWidget):
         if edit is not None and edit.text() != self.ss_context.values.get("-w", ""):
             edit.setText(self.ss_context.values.get("-w", ""))
 
+    def _configure_toolbar(self, toolbar):
+        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+
     def _action(self, container, text, slot, shortcut=None) -> QAction:
-        action = QAction(text, self)
+        SP = QStyle.StandardPixmap
+        icons = {
+            "Open…": (
+                "Open…", "document-open", SP.SP_DialogOpenButton
+            ),
+            "Save": (
+                "Save", "document-save", SP.SP_DialogSaveButton
+            ),
+            "Save As…": (
+                "Save As…", "document-save-as", SP.SP_DialogSaveButton
+            ),
+            "Reload": (
+                "Reload", "view-refresh", SP.SP_BrowserReload
+            ),
+            "▶ Line": (
+                "Line", "media-playback-start", SP.SP_MediaPlay
+            ),
+            "▶ Selection": (
+                "Selection", "media-playback-start", SP.SP_MediaPlay
+            ),
+            "▶ File": (
+                "File", "system-run", SP.SP_MediaPlay
+            ),
+            "▶ Function": (
+                "Define function", "code-function", SP.SP_FileIcon
+            ),
+            "⟳ Load functions": (
+                "Load functions", "view-refresh", SP.SP_BrowserReload
+            ),
+            "■ Interrupt": (
+                "Interrupt", "process-stop", SP.SP_MediaStop
+            ),
+            "↻ Restart shell": (
+                "Restart shell", "view-refresh", SP.SP_BrowserReload
+            ),
+            "Clear": (
+                "Clear", "edit-clear", SP.SP_DialogResetButton
+            ),
+        }
+
+        icon_spec = icons.get(text)
+        label = icon_spec[0] if icon_spec else text
+        action = QAction(label, self)
+        if icon_spec:
+            _, theme_name, standard_icon = icon_spec
+            action.setIcon(QIcon.fromTheme(
+                theme_name,
+                self.style().standardIcon(standard_icon),
+            ))
         if shortcut is not None:
             action.setShortcut(QKeySequence(shortcut))
             # Do not clash with main window shortcuts (Ctrl+O, Ctrl+W, ...).
             action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        descriptions = {
+            "Line": "Execute the current line; inside a function, define its block",
+            "Selection": "Execute the selected code",
+            "File": "Execute the entire script, including unsaved changes",
+            "Define function": "Load the function at the cursor into Bash; do not call it",
+            "Load functions": "Load all function definitions into Bash; do not call them",
+            "Interrupt": "Interrupt running external commands",
+            "Restart shell": "Restart Bash; shell variables and state are reset",
+            "Clear": "Clear console output without resetting Bash",
+        }
+        tip = descriptions.get(label, label)
+        if shortcut is not None:
+            tip += f" ({action.shortcut().toString()})"
+        action.setToolTip(tip)
+        action.setStatusTip(tip)
         action.triggered.connect(lambda checked=False: slot())
         container.addAction(action)
         if container is not self:
@@ -930,8 +1031,3 @@ class BashEditorWidget(QWidget):
             self.statusMessage.emit("Cursor is not inside a function definition")
             return
         self._define_functions([f], "redefining")
-
-    def _on_shell_started(self):
-        # New shell: nothing is defined any more.
-        self._loaded_functions.clear()
-        self.sync_functions()
