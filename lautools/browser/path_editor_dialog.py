@@ -1,4 +1,3 @@
-from datetime import datetime
 from pathlib import Path
 import os
 import sqlite3
@@ -9,13 +8,14 @@ from PySide6.QtWidgets import (
     QLabel, QMessageBox, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout,
 )
-
+from lautools.browser.path_manager import PathManager
 
 class PathEditorDialog(QDialog):
     def __init__(self, db, project_id=None, parent=None):
         super().__init__(parent)
         self.db = db
         self.project_id = project_id
+        self.path_manager = PathManager(db)
 
         self.setWindowTitle("PATH — Global and project")
         self.resize(800, 450)
@@ -36,26 +36,14 @@ class PathEditorDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
-
-        rows = db.connection.execute(
-            """
-            SELECT l.id, l.disk_location,
-                   (g.location_id IS NOT NULL) AS global_member,
-                   (p.location_id IS NOT NULL) AS local_member
-            FROM lautools_location l
-            LEFT JOIN lautools_paths g ON g.location_id = l.id
-            LEFT JOIN lautools_project_paths p
-                ON p.location_id = l.id AND p.project_id = ?
-            WHERE NULLIF(TRIM(l.disk_location), '') IS NOT NULL
-            ORDER BY l.disk_location, l.id
-            """,
-            (project_id,),
-        ).fetchall()
-        for row in rows:
-            self._add_row(
-                row["id"], row["disk_location"],
-                bool(row["global_member"]), bool(row["local_member"]),
-            )
+        self.entries = self.path_manager.list_entries(project_id)
+        for entry in self.entries:
+             self._add_row(
+                entry.location.id,
+                str(entry.location.disk_location),
+                entry.is_global,
+                entry.is_project,
+             )
 
         add = QPushButton("Add directory…")
         add.clicked.connect(self._browse)
@@ -97,92 +85,29 @@ class PathEditorDialog(QDialog):
             if Path(existing).expanduser().resolve() == Path(directory):
                 self.table.selectRow(row)
                 return
-
+        self.entries = self.path_manager.add_directory(
+            self.entries,
+            directory,
+            self.project_id,
+        )
         self._add_row(
-            None, directory,
-            global_member=self.project_id is None,
-            local_member=self.project_id is not None,
+            self.entries[-1].location.id,
+            str(self.entries[-1].location.disk_location),
+            self.entries[-1].is_global,
+            self.entries[-1].is_project,
         )
 
     def _save(self):
         try:
-            with self.db.transaction():
-                for row in range(self.table.rowCount()):
-                    item = self.table.item(row, 0)
-                    location_id = item.data(Qt.UserRole)
-                    directory = item.text()
-                    global_member = (
-                        self.table.item(row, 1).checkState() == Qt.Checked
-                    )
-                    local_member = (
-                        self.project_id is not None
-                        and self.table.item(row, 2).checkState() == Qt.Checked
-                    )
-
-                    if global_member or local_member:
-                        path = Path(directory).expanduser()
-                        if (
-                            not path.is_absolute()
-                            or os.pathsep in directory
-                            or "\n" in directory
-                            or "\r" in directory
-                        ):
-                            raise ValueError(f"Invalid PATH directory: {directory}")
-                        if path.exists() and not path.is_dir():
-                            raise ValueError(f"Not a directory: {directory}")
-
-                    if location_id is None:
-                        if not (global_member or local_member):
-                            continue
-                        now = datetime.now().isoformat(timespec="seconds")
-                        cursor = self.db.connection.execute(
-                            """
-                            INSERT INTO lautools_location
-                                (name, disk_location, created_at, updated_at)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            (Path(directory).name or directory, directory, now, now),
-                        )
-                        location_id = cursor.lastrowid
-
-                    # Modify memberships only; never delete the location itself.
-                    for table, enabled, project_id in (
-                        ("lautools_paths", global_member, None),
-                        ("lautools_project_paths", local_member, self.project_id),
-                    ):
-                        if table == "lautools_project_paths" and project_id is None:
-                            continue
-
-                        scope = "" if project_id is None else "project_id = ? AND "
-                        args = () if project_id is None else (project_id,)
-
-                        if enabled:
-                            # Append new memberships; retain existing positions.
-                            columns = "location_id, position"
-                            values = (location_id,)
-                            where = ""
-                            if project_id is not None:
-                                columns = "project_id, " + columns
-                                values = (project_id, location_id)
-                                where = " WHERE project_id = ?"
-                            placeholders = ", ".join("?" for _ in values)
-                            self.db.connection.execute(
-                                f"""
-                                INSERT INTO {table} ({columns})
-                                SELECT {placeholders}, COALESCE(MAX(position), -1) + 1
-                                FROM {table}{where}
-                                ON CONFLICT DO NOTHING
-                                """.replace(
-                                    f"FROM {table}\n",
-                                    f"FROM {table} WHERE 1\n",
-                                ),
-                                (*values, *args),
-                            )
-                        else:
-                            self.db.connection.execute(
-                                f"DELETE FROM {table} WHERE {scope}location_id = ?",
-                                (*args, location_id),
-                            )
+            for row, entry in enumerate(self.entries):
+                entry.is_global = (
+                    self.table.item(row, 1).checkState() == Qt.Checked
+                )
+                entry.is_project = (
+                    self.project_id is not None
+                    and self.table.item(row, 2).checkState() == Qt.Checked
+                )
+            self.path_manager.save_memberships(self.entries, self.project_id)
         except (ValueError, OSError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "Cannot save PATH", str(exc))
             return

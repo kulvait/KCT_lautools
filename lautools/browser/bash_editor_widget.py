@@ -115,11 +115,8 @@ class BashSession(QObject):
 
     def set_path(self, path_value: str | None):
         self._path_value = path_value
-        if self.is_running() and path_value:
-            self.execute(
-                f"export PATH={shlex.quote(path_value)}\nhash -r",
-                silent=True,
-            )
+        if self.is_running() and path_value is not None:
+            self.execute(f"export PATH={shlex.quote(path_value)}\nhash -r", silent=True,)
     # -- lifecycle -----------------------------------------------------
 
     def is_running(self) -> bool:

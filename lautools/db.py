@@ -451,6 +451,22 @@ class LaupyDB:
         ).fetchall()
         return [self._row_to_path_entry(r) for r in rows]
 
+    def replace_path_entries(
+        self,
+        entries: list[LautoolsPath],
+    ) -> None:
+        with self.transaction():
+            self.connection.execute("DELETE FROM lautools_paths")
+            for entry in entries:
+                self.connection.execute(
+                    """
+                    INSERT INTO lautools_paths (
+                        location_id, position
+                    ) VALUES (?, ?)
+                    """,
+                    (entry.location_id, entry.position),
+                )
+
     def list_project_path_entries(
         self,
         project_id: int,

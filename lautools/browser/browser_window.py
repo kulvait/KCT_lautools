@@ -43,9 +43,8 @@ from lautools.browser.utils import (
 from lautools import about as lautools_about
 from lautools.browser.size_service_qt import SizeServiceBridge
 from lautools.size_service import SizeEventKind, SizeService
-from lautools.browser.path_resolver import effective_path
-from lautools.browser.project_path_store import load_project_path_settings
 from lautools.browser.path_editor_dialog import PathEditorDialog
+from lautools.browser.path_manager import PathManager
 
 PROJECT_REPOSITORY_URL = "https://github.com/kulvait/KCT_lautools"
 
@@ -79,6 +78,7 @@ class BrowserWindow(QMainWindow):
 
         self.db = db
         self.project_manager = ProjectManager(db)
+        self.path_manager = PathManager(db)
 
         self.current_project = None
         self.current_workspace = None
@@ -1661,44 +1661,14 @@ class BrowserWindow(QMainWindow):
     # Path handling
     #------------------------------------------------------------------
     def edit_project_path(self):
-        project_id = (
-            self.current_project.id if self.current_project else None
-        )
+        project_id = (self.current_project.id if self.current_project else None)
         dialog = PathEditorDialog(self.db, project_id, parent=self)
         if dialog.exec() == QDialog.Accepted:
             self._apply_project_path()
             self.status_label.setText("PATH saved; terminal update queued")
 
     def _apply_project_path(self):
-        project_id = (
-            self.current_project.id if self.current_project else None
-        )
-        rows = self.db.connection.execute(
-            """
-            SELECT l.disk_location
-            FROM (
-                SELECT location_id, position, 0 AS priority
-                FROM lautools_project_paths WHERE project_id = ?
-                UNION ALL
-                SELECT location_id, position, 1 AS priority
-                FROM lautools_paths
-            ) p
-            JOIN lautools_location l ON l.id = p.location_id
-            WHERE NULLIF(TRIM(l.disk_location), '') IS NOT NULL
-            ORDER BY p.priority, p.position, p.location_id
-            """,
-            (project_id,),
-        ).fetchall()
-
-        directories = []
-        for row in rows:
-            path = Path(row["disk_location"]).expanduser()
-            if not path.is_absolute():
-                raise ValueError(f"PATH directory must be absolute: {path}")
-            directories.append(str(path.resolve()))
-
-        # Rebuild from the application's inherited PATH, never the shell's
-        # previously modified PATH. This prevents project-path accumulation.
-        directories.extend(os.environ.get("PATH", os.defpath).split(os.pathsep))
-        path_value = os.pathsep.join(dict.fromkeys(directories))
-        self.pipeline_editor.session.set_path(path_value)
+        project_id = (self.current_project.id if self.current_project else None)
+        self.path_manager.apply_to_session(
+            self.pipeline_editor.session,
+            project_id,)
