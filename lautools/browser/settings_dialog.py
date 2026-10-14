@@ -288,8 +288,8 @@ class SettingsDialog(QDialog):
 
         note = QLabel(
             "Changes are saved only with Save. Removing a registration "
-            "does not delete its directory. 'In PATH' records membership; "
-            "it does not change the application's PATH yet."
+            "does not delete its directory. 'In PATH' defines the default "
+            "PATH membership used by project terminals unless overridden for a specific project."
         )
         note.setWordWrap(True)
         layout.addWidget(note)

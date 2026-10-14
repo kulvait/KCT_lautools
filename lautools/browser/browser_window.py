@@ -796,7 +796,8 @@ class BrowserWindow(QMainWindow):
             size_service=self.size_service,
             parent=self,
         )
-
+        if hasattr(dialog, "path_editor_button"):
+            dialog.path_editor_button.clicked.connect(lambda: self.edit_project_path(dialog))
         result = dialog.exec()
         # Update possible changes
         if self.current_workspace is not None:
@@ -1594,7 +1595,14 @@ class BrowserWindow(QMainWindow):
         self._reset_tab_texts()
         self.refresh_locations()
         self._update_action_states()
-        self._apply_project_path()
+        try:
+            self._apply_project_path()
+        except Exception as exc:
+            log.exception("Cannot apply PATH for project %s", self.current_project.path if self.current_project else None)
+            self.status_label.setText(f"PATH configuration error: {exc}")
+         self.pipeline_editor.set_project(
+             self.current_project.path if self.current_project else None
+         )
         self.pipeline_editor.set_project(
             self.current_project.path if self.current_project else None
         )
