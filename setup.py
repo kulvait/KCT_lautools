@@ -76,6 +76,7 @@ setup(
             "tiffScanInfoForMicrotomography = lautools.scripts.tiffScanInfoForMicrotomography:main",
             "tiffScanDataToZarrForNanotomography = lautools.scripts.tiffScanDataToZarrForNanotomography:main",
             "tiffScanDataToZarrForMicrotomography = lautools.scripts.tiffScanDataToZarrForMicrotomography:main",
+            "currentCorrect = lautools.scripts.currentCorrect:main",
         ]
     },
     version=__version__,

@@ -111,7 +111,15 @@ class BashSession(QObject):
         self._busy = False
         self._queue: list[str] = []
         self._cwd: Path | None = None
+        self._path_value: str | None = None
 
+    def set_path(self, path_value: str | None):
+        self._path_value = path_value
+        if self.is_running() and path_value:
+            self.execute(
+                f"export PATH={shlex.quote(path_value)}\nhash -r",
+                silent=True,
+            )
     # -- lifecycle -----------------------------------------------------
 
     def is_running(self) -> bool:
@@ -133,6 +141,8 @@ class BashSession(QObject):
         proc.setProcessChannelMode(QProcess.MergedChannels)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("TERM", "dumb")
+        if self._path_value:
+            env.insert("PATH", self._path_value)
         proc.setProcessEnvironment(env)
         proc.readyReadStandardOutput.connect(self._on_ready_read)
         proc.finished.connect(self._on_finished)
@@ -458,6 +468,8 @@ class CodeEditor(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self._area = _LineNumberArea(self)
+        self._exec_range: tuple[int, int] | None = None
+        self._exec_format = _fmt(background="#dff5d8")
         self.blockCountChanged.connect(self._update_width)
         self.updateRequest.connect(self._update_area)
         self.cursorPositionChanged.connect(self._highlight_current_line)
@@ -465,6 +477,8 @@ class CodeEditor(QPlainTextEdit):
         self._highlight_current_line()
         #self._highlighter = BashHighlighter(self.document())
         self._highlighter = InfoScriptHighlighter(self.document())
+
+
 
     def line_number_area_width(self) -> int:
         digits = len(str(max(1, self.blockCount())))
@@ -512,7 +526,29 @@ class CodeEditor(QPlainTextEdit):
         selection.format.setProperty(QTextFormat.FullWidthSelection, True)
         selection.cursor = self.textCursor()
         selection.cursor.clearSelection()
-        self.setExtraSelections([selection])
+        selections = [selection]
+        if self._exec_range is not None:
+            start, end = self._exec_range
+            exec_sel = QTextEdit.ExtraSelection()
+            exec_sel.format = self._exec_format
+            c = self.textCursor()
+            doc = self.document()
+            b1 = doc.findBlockByNumber(start)
+            b2 = doc.findBlockByNumber(end)
+            if b1.isValid() and b2.isValid():
+                c.setPosition(b1.position())
+                c.setPosition(b2.position() + b2.length() - 1, QTextCursor.KeepAnchor)
+                exec_sel.cursor = c
+                exec_sel.format.setProperty(QTextFormat.FullWidthSelection, True)
+                selections.append(exec_sel)
+        self.setExtraSelections(selections)
+
+    def set_execution_range(self, start_line: int | None, end_line: int | None):
+        if start_line is None or end_line is None:
+            self._exec_range = None
+        else:
+            self._exec_range = (start_line, end_line)
+        self._highlight_current_line()
 
 
 # ----------------------------------------------------------------------
@@ -523,6 +559,7 @@ class BashEditorWidget(QWidget):
     """Editor (top) + persistent bash console (bottom)."""
 
     statusMessage = Signal(str)
+    projectPathRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -643,6 +680,9 @@ class BashEditorWidget(QWidget):
         )
         self._action(
             shell_toolbar, "Clear", lambda: self.console.clear()
+        )
+        self._action(
+            shell_toolbar, "PATH…", self.projectPathRequested.emit
         )
 
         shell_spacer = QWidget()
@@ -908,6 +948,9 @@ class BashEditorWidget(QWidget):
         self._append(echo, "#0033b3")
         self.session.execute(code)
 
+    def _set_last_executed_range(self, start_line: int | None, end_line: int | None):
+        self.editor.set_execution_range(start_line, end_line)
+
     def _advance_cursor_after(self, block):
         cursor = self.editor.textCursor()
         cursor.setPosition(block.position())
@@ -934,6 +977,7 @@ class BashEditorWidget(QWidget):
         f = function_at(self._functions, line)
         if f is not None:
             self._define_functions([f], "redefining")
+            self._set_last_executed_range(f.start, f.end)
             self._advance_cursor_after(
                 self.editor.document().findBlockByNumber(f.end)
             )
@@ -946,6 +990,7 @@ class BashEditorWidget(QWidget):
         code = "\n".join(lines)
         if code.strip() and not SEPARATOR_RE.match(code):
             self._execute(code)
+            self._set_last_executed_range(block.blockNumber(), block.blockNumber())
         self._advance_cursor_after(block)
 
     def run_selection(self):
@@ -956,15 +1001,18 @@ class BashEditorWidget(QWidget):
         self._refresh_functions()
         text = cursor.selectedText().replace("\u2029", "\n")
         first = self.editor.document().findBlock(cursor.selectionStart()).blockNumber()
+        last = self.editor.document().findBlock(cursor.selectionEnd()).blockNumber()
         if first < self._header_end:   # drop header lines from the selection
             text = "\n".join(text.split("\n")[self._header_end - first:])
         self._execute(text)
+        self._set_last_executed_range(first, last)
 
     def run_file(self):
         """Run everything after the INFO header (including unsaved edits)."""
         self._refresh_functions()
         self._execute(executable_text(self.editor.toPlainText()),
                       sync_functions=False)
+        self._set_last_executed_range(self._header_end, self.editor.blockCount() - 1)
         # Running the file defines every function in it.
         for f in self._functions:
             self._loaded_functions[f.name] = f.code

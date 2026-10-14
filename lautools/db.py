@@ -205,6 +205,12 @@ class LautoolsPath:
     position: int = 0
 
 @dataclass
+class LautoolsProjectPath:
+    project_id: int
+    location_id: int
+    position: int = 0
+
+@dataclass
 class LautoolsConfig:
     default_cookbook_location_id: int | None = None
     default_workbench_location_id: int | None = None
@@ -428,6 +434,56 @@ class LaupyDB:
             location_id=row["location_id"],
             position=row["position"],
         )
+
+    def _row_to_project_path_entry(self, row) -> LautoolsProjectPath:
+        return LautoolsProjectPath(
+            project_id=row["project_id"],
+            location_id=row["location_id"],
+            position=row["position"],
+        )
+
+    def list_path_entries(self) -> list[LautoolsPath]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM lautools_paths
+            ORDER BY position, location_id
+            """
+        ).fetchall()
+        return [self._row_to_path_entry(r) for r in rows]
+
+    def list_project_path_entries(
+        self,
+        project_id: int,
+    ) -> list[LautoolsProjectPath]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM lautools_project_paths
+            WHERE project_id = ?
+            ORDER BY position, location_id
+            """,
+            (project_id,),
+        ).fetchall()
+        return [self._row_to_project_path_entry(r) for r in rows]
+
+    def replace_project_path_entries(
+        self,
+        project_id: int,
+        entries: list[LautoolsProjectPath],
+    ) -> None:
+        with self.transaction():
+            self.connection.execute(
+                "DELETE FROM lautools_project_paths WHERE project_id = ?",
+                (project_id,),
+            )
+            for entry in entries:
+                self.connection.execute(
+                    """
+                    INSERT INTO lautools_project_paths (
+                        project_id, location_id, position
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (project_id, entry.location_id, entry.position),
+                )
 
     def add_beamtime(self, beamtime: Beamtime) -> Beamtime:
         now = _iso(_now())

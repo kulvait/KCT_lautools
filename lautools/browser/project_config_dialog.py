@@ -290,6 +290,9 @@ class ProjectConfigDialog(QDialog):
         self.description_edit.setMaximumHeight(100)
         form.addRow("Description:", self.description_edit)
 
+        self.path_editor_button = QPushButton("Project PATH…")
+        form.addRow("Executable search path:", self.path_editor_button)
+
         self.project_row = _SizeRow()
         self.project_row.button.clicked.connect(
             lambda: self._request(self._project_path)

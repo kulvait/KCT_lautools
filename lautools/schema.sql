@@ -242,6 +242,20 @@ CREATE TABLE IF NOT EXISTS lautools_paths (
     position INTEGER NOT NULL DEFAULT 0
 );
 
+-- Project-specific PATH additions / overrides.
+-- Uses the same registered locations as lautools_paths.
+CREATE TABLE IF NOT EXISTS lautools_project_paths (
+    project_id INTEGER NOT NULL
+        REFERENCES laupy_project(id) ON DELETE CASCADE,
+    location_id INTEGER NOT NULL
+        REFERENCES lautools_location(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, location_id)
+);
+
+CREATE INDEX IF NOT EXISTS lautools_project_paths_project_id_idx
+    ON lautools_project_paths(project_id, position, location_id);
+
 -- Default cookbook and default workbench for new project creation.
 CREATE TABLE IF NOT EXISTS lautools_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),
