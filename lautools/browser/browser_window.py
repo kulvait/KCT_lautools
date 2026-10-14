@@ -224,6 +224,8 @@ class BrowserWindow(QMainWindow):
         self._add_workspace_creation_actions(self.project_menu, wd_dirs)
 
     def _add_workspace_creation_actions(self, menu: QMenu, wd_dirs: list[str]):
+        if self.current_project is None:
+            return
         if "wd" not in wd_dirs:
             create_action = menu.addAction("Create wd")
             create_action.triggered.connect(self.create_working_directory)
@@ -292,11 +294,13 @@ class BrowserWindow(QMainWindow):
         their directories have disappeared. New directories are registered in
         the database so that they can participate in history.
         """
+        if self.current_project is None:
+            return []
         try:
             project_path = self.current_project.path.resolve()
             wd_paths = sorted( entry.name for entry in project_path.iterdir() if entry.is_dir() and entry.name.startswith("wd"))
             return wd_paths
-        except Exception:
+        except OSError:
             log.exception("Cannot resolve current project path")
             return []
 
