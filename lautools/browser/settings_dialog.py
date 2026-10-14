@@ -9,7 +9,7 @@ import shutil
 
 from git import Repo
 from git.exc import GitError, InvalidGitRepositoryError
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
@@ -212,7 +212,7 @@ class GitCloneThread(QThread):
 class SettingsDialog(QDialog):
     NAME, DIRECTORY, UPSTREAM, GIT, COOKBOOK, WORKBENCH, PATH = range(7)
 
-    def __init__(self, db, parent=None):
+    def __init__(self, db, parent=None, *, start_default_setup=False):
         super().__init__(parent)
         self.db = db
         self.entries, self.config = load_settings(db)
@@ -301,6 +301,8 @@ class SettingsDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         outer.addWidget(self.buttons)
         self._render()
+        if start_default_setup:
+            QTimer.singleShot(0, self._setup_defaults)
 
     def _render(self):
         self.table.blockSignals(True)

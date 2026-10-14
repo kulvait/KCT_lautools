@@ -9,10 +9,12 @@ import logging
 from pathlib import Path
 
 from platformdirs import user_data_dir
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QIcon
 
 from lautools.browser.browser_window import BrowserWindow
+from lautools.browser.settings_dialog import SettingsDialog
 from lautools.db import LaupyDB
 from lautools import resources_pyside
 
@@ -100,6 +102,14 @@ def configure_qt_scaling(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    # Check before get_database_path() or LaupyDB creates anything.
+    data_dir = Path(user_data_dir(APP_NAME))
+    default_database = data_dir / DEFAULT_DATABASE_NAME
+    first_run = (
+        not args.laupy_db
+        and not os.path.lexists(data_dir)
+        and not os.path.lexists(default_database)
+    )
     database_path = get_database_path(args.laupy_db)
     log.info(f"Using database: {database_path}")
 
@@ -114,6 +124,21 @@ def main() -> None:
     db = LaupyDB(database_path)
     window = BrowserWindow(db)
     window.show()
+    def offer_first_run_setup():
+        answer = QMessageBox.question(
+            window,
+            "Welcome to Lautools",
+            "It seems you are running this app for the first time. "
+            "Do you want to set up your cookbook and workbench?\n\n"
+            "You can also do this later in File → Settings → Set up defaults.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            dialog = SettingsDialog(db, parent=window, start_default_setup=True,)
+            dialog.exec()
+    if first_run:
+        QTimer.singleShot(0, offer_first_run_setup)
     app.exec()
 
 

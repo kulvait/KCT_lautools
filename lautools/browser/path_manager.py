@@ -4,9 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from lautools.browser.settings_store import LautoolsLocation
-from lautools.db import LautoolsProjectPath, LautoolsPath
-
+from lautools.db import LautoolsLocation, LautoolsProjectPath, LautoolsPath
 
 @dataclass
 class ManagedPathEntry:
