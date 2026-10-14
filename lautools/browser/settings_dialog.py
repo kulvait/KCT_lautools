@@ -287,7 +287,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(actions)
 
         note = QLabel(
-            "Changes are saved only with Save. Removing a registration "
+            "Changes are saved only with Save. Removing an item from the database registry "
             "does not delete its directory. 'In PATH' defines the default "
             "PATH membership used by project terminals unless overridden for a specific project."
         )

@@ -1600,9 +1600,6 @@ class BrowserWindow(QMainWindow):
         except Exception as exc:
             log.exception("Cannot apply PATH for project %s", self.current_project.path if self.current_project else None)
             self.status_label.setText(f"PATH configuration error: {exc}")
-         self.pipeline_editor.set_project(
-             self.current_project.path if self.current_project else None
-         )
         self.pipeline_editor.set_project(
             self.current_project.path if self.current_project else None
         )
