@@ -61,6 +61,7 @@ setup(
     author="Vojtěch Kulvait",
     author_email="vojtech.kulvait@hereon.de",
     packages=find_packages(),
+    package_data={"lautools": ["schema.sql"]},
     install_requires=pkg_requires,
     extras_require=extras,
     entry_points={
