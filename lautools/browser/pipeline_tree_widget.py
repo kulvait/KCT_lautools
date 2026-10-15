@@ -372,7 +372,7 @@ class PipelineTreeWidget(QWidget):
             item.addChild(stderr_item)
 
         # Add sub-items for more details
-        dag_id_item = QTreeWidgetItem(["", "", "DAG ID", str(entry.get("dag_id", "N/A"))])
+        dag_id_item = QTreeWidgetItem(["", "", "Job ID", str(job_id)])
         item.addChild(dag_id_item)
         if job_state == "PENDING":
             reason = slurm_info.get("Reason", "N/A")
