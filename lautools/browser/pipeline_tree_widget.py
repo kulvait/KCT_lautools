@@ -12,6 +12,7 @@ import logging
 
 from PySide6.QtCore import Qt, QTimer, QProcess, QThread, QObject, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -106,8 +107,9 @@ class PipelineTreeWidget(QWidget):
     - auto_refresh_interval: int (milliseconds)
     """
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, environment_provider=None):
         super().__init__(parent)
+        self.environment_provider = environment_provider
         self.pipeline_manager: Optional[PipelineManager] = None
         self.current_working_dir: Optional[Path] = None
         
@@ -172,7 +174,7 @@ class PipelineTreeWidget(QWidget):
         self.tree.setHeaderLabels([
             "Execution Unit",
             "Step",
-            "Job ID",
+            "Slurm ID",
             "Name",
             "State",
             "Details"
@@ -325,6 +327,14 @@ class PipelineTreeWidget(QWidget):
         step = entry.get("step", "N/A")
         job_id = entry.get("job_id", "N/A")
         slurm_info = entry.get("slurm_info", {})
+        slurm_id = entry.get("slurm_id")
+        if slurm_id is None:
+            slurm_id = slurm_info.get("JobID")
+        # Older DAG files used a numeric job_id as the Slurm ID.
+        if slurm_id is None:
+            legacy_id = entry.get("job_id")
+            if legacy_id is not None and str(legacy_id).isdigit():
+                slurm_id = legacy_id
         job_name = slurm_info.get("JobName", "N/A")
         job_state = slurm_info.get("State", "UNKNOWN")
         stdout_file = slurm_info.get("StdOut", None)
@@ -333,7 +343,7 @@ class PipelineTreeWidget(QWidget):
         item = QTreeWidgetItem([
             str(execution_unit),
             str(step),
-            str(job_id),
+            str(slurm_id),
             job_name,
             job_state,
             self._format_details(entry),
@@ -362,11 +372,13 @@ class PipelineTreeWidget(QWidget):
             item.addChild(stderr_item)
 
         # Add sub-items for more details
+        dag_id_item = QTreeWidgetItem(["", "", "DAG ID", str(entry.get("dag_id", "N/A"))])
+        item.addChild(dag_id_item)
         if job_state == "PENDING":
             reason = slurm_info.get("Reason", "N/A")
             if reason and reason not in ("N/A", "None", ""):
                 reason_item = QTreeWidgetItem(
-                    ["", "", "", "", "Reason", reason]
+                    ["", "", "Reason", reason]
                 )
                 item.addChild(reason_item)
         elif job_state == "RUNNING":
@@ -375,13 +387,13 @@ class PipelineTreeWidget(QWidget):
             node_list = slurm_info.get("NodeList", "N/A")
             
             elapsed_item = QTreeWidgetItem(
-                ["", "", "", "", "Elapsed", elapsed]
+                ["", "", "Elapsed", elapsed]
             )
             limit_item = QTreeWidgetItem(
-                ["", "", "", "", "Time Limit", time_limit]
+                ["", "", "Time Limit", time_limit]
             )
             nodes_item = QTreeWidgetItem(
-                ["", "", "", "", "Nodes", node_list]
+                ["", "", "Nodes", node_list]
             )
             item.addChild(elapsed_item)
             item.addChild(limit_item)
@@ -392,14 +404,14 @@ class PipelineTreeWidget(QWidget):
         if dependencies:
             deps_str = ", ".join(str(d) for d in dependencies)
             deps_item = QTreeWidgetItem(
-                ["", "", "", "", "Dependencies", deps_str]
+                ["", "", "Dependencies", deps_str]
             )
             item.addChild(deps_item)
         
         # Mark if retired
         if entry.get("retired", False):
             retired_item = QTreeWidgetItem(
-                ["", "", "", "", "Status", "RETIRED"]
+                ["", "", "Status", "RETIRED"]
             )
             item.addChild(retired_item)
 
@@ -529,6 +541,9 @@ class PipelineTreeWidget(QWidget):
             self.status_label.setText(f"Failed to requeue job {slurm_id}: no execution directory")
             return
         try:
+            env = None
+            if self.environment_provider is not None:
+                env = self.environment_provider.get_environment()
             dag_entries = load_dag(execution_unit_dir)
             update_dag_entries(dag_entries, update_retired=False, update_negative_step=False, filter_terminal_states=True,)
             dag_entry = next((e for e in dag_entries if e.get("job_id") == job_id), None)
@@ -536,7 +551,8 @@ class PipelineTreeWidget(QWidget):
                 log.error("Cannot requeue job %s: job not found in DAG %s", job_id, execution_unit_dir,)
                 self.status_label.setText(f"Failed to requeue job {slurm_id}: job not found")
                 return
-            new_entry = resubmit_slurm_job(dag_entries, dag_entry)
+            new_entry = resubmit_slurm_job(dag_entries, dag_entry, env=env)
+            new_slurm_id = new_entry.get("slurm_id") if new_entry else None
             if new_entry is None:
                 log.error("Failed to requeue job %s: resubmit_slurm_job returned None", slurm_id,)
                 self.status_label.setText(f"Failed to requeue job {slurm_id}")
@@ -547,8 +563,8 @@ class PipelineTreeWidget(QWidget):
             log.exception("Failed to requeue job %s in %s", slurm_id, execution_unit_dir,)
             self.status_label.setText(f"Failed to requeue job {slurm_id}")
             return
-        log.info("Requeued SLURM job %s", slurm_id)
-        self.status_label.setText(f"Requeued job {slurm_id}")
+        log.info("Requeued original SLURM job %s as new job %s", slurm_id, new_slurm_id)
+        self.status_label.setText(f"Requeued job {slurm_id} as {new_slurm_id}")
         self.refresh()
 
     def _format_details(self, entry: Dict[str, Any]) -> str:

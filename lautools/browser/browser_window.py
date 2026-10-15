@@ -575,11 +575,21 @@ class BrowserWindow(QMainWindow):
     def _create_status_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-
-        self.pipeline_status_tree = PipelineTreeWidget()
+        self.pipeline_status_tree = PipelineTreeWidget(environment_provider=self._pipeline_job_environment,)
         layout.addWidget(self.pipeline_status_tree)
-
         return widget
+
+    # To propagate PATH to pipeline jobs, e.g. for resubmission, we need to build a fresh environment with the selected project's PATH.
+    def _pipeline_job_environment(self):
+        """Build a fresh environment using the selected project's PATH."""
+        if self.current_project is None:
+            raise RuntimeError("No project selected")
+
+        env = os.environ.copy()
+        env["PATH"] = self.path_manager.effective_path(
+            self.current_project.id,
+        )
+        return env
 
     def _open_info_in_pipeline_tab(self):
         if self.current_project is None:
