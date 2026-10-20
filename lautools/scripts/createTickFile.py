@@ -50,7 +50,6 @@ def main():
 		normalization = subparser.add_mutually_exclusive_group()
 		normalization.add_argument("--normalize-angles", action="store_true", help="Subtract the first imaging angle of the full sequence, before cropping (default: preserve original angles)")
 		normalization.add_argument("--normalize-cropped-angles", action="store_true", help="Subtract the first imaging angle of the selected range, making the cropped sequence start at zero")
-		subparser.add_argument("--normalize-angles", action="store_true", help="Normalize angles to start from zero (default: False)")
 		subparser.add_argument("--include-current", action="store_true", help="Include ring current in output (default: False)")
 	ARG = parser.parse_args()
 	if ARG.mode == "micro":
