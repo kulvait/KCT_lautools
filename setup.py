@@ -68,6 +68,7 @@ setup(
         "console_scripts": [
             "lautools-browser = lautools.browser.main:main",
             "binDenFile = lautools.scripts.binDenFile:main",
+            "selectAngleSequenceForFBP = lautools.scripts.selectAngleSequenceForFBP:main",
             "GPU = lautools.scripts.GPU:main",
             "removeHotPixels = lautools.scripts.removeHotPixels:main",
             "createTickFile = lautools.scripts.createTickFile:main",
