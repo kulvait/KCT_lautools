@@ -44,6 +44,13 @@ cd KCT_lautools
 pip install --user --upgrade -e .
 ```
 
+To perform user editable upgrade of full package
+```bash
+git clone https://github.com/kulvait/KCT_lautools.git
+cd KCT_lautools
+pip install --user --upgrade -e '.[full]'
+```
+
 
 ### Upgrading the Package
 To update the package, use

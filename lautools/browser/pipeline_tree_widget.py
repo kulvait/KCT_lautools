@@ -552,7 +552,7 @@ class PipelineTreeWidget(QWidget):
         try:
             env = None
             if self.environment_provider is not None:
-                env = self.environment_provider.get_environment()
+                env = self.environment_provider()
             dag_entries = load_dag(execution_unit_dir)
             update_dag_entries(dag_entries, update_retired=False, update_negative_step=False, filter_terminal_states=True,)
             dag_entry = next((e for e in dag_entries if e.get("job_id") == job_id), None)
