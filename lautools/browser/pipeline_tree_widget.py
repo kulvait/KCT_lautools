@@ -173,14 +173,14 @@ class PipelineTreeWidget(QWidget):
         self.tree.setColumnCount(6)
         self.tree.setHeaderLabels([
             "Execution Unit",
-            "Step",
+            "Step/Node",
             "Slurm ID",
             "Name",
             "State",
             "Details"
         ])
         self.tree.setColumnWidth(0, 50)
-        self.tree.setColumnWidth(1, 50)
+        self.tree.setColumnWidth(1, 60)
         self.tree.setColumnWidth(2, 80)
         self.tree.setColumnWidth(3, 120)
         self.tree.setColumnWidth(4, 100)
@@ -328,13 +328,10 @@ class PipelineTreeWidget(QWidget):
         job_id = entry.get("job_id", "N/A")
         slurm_info = entry.get("slurm_info", {})
         slurm_id = entry.get("slurm_id")
+        dag_node_name = entry.get("dag_node_name", str(step))
+        command = entry.get("command", "N/A")
         if slurm_id is None:
             slurm_id = slurm_info.get("JobID")
-        # Older DAG files used a numeric job_id as the Slurm ID.
-        if slurm_id is None:
-            legacy_id = entry.get("job_id")
-            if legacy_id is not None and str(legacy_id).isdigit():
-                slurm_id = legacy_id
         job_name = slurm_info.get("JobName", "N/A")
         job_state = slurm_info.get("State", "UNKNOWN")
         stdout_file = slurm_info.get("StdOut", None)
@@ -342,7 +339,7 @@ class PipelineTreeWidget(QWidget):
         
         item = QTreeWidgetItem([
             str(execution_unit),
-            str(step),
+            str(dag_node_name),
             str(slurm_id),
             job_name,
             job_state,
@@ -374,6 +371,8 @@ class PipelineTreeWidget(QWidget):
         # Add sub-items for more details
         dag_id_item = QTreeWidgetItem(["", "", "Job ID", str(job_id)])
         item.addChild(dag_id_item)
+        command_item = QTreeWidgetItem(["", "", "Command", str(command)])
+        item.addChild(command_item)
         if job_state == "PENDING":
             reason = slurm_info.get("Reason", "N/A")
             if reason and reason not in ("N/A", "None", ""):

@@ -146,6 +146,6 @@ class PipelineManager:
             entries = [ entry for entry in self.DAG_ENTRIES if entry.get("retired", False) is not True]
         if not show_completed:
             entries = [ entry for entry in entries if entry.get("slurm_info", {}).get("State") != "COMPLETED"]
-        #Sort entries by execution unit name and step number
-        entries.sort(key=lambda x: (x.get("execution_unit_name", ""), x.get("step", 0)))
+        #Sort entries by execution unit name, not by step this shall preserve submission order
+        entries.sort(key=lambda x: (x.get("execution_unit_name", "")))
         return entries
