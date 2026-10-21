@@ -2,7 +2,6 @@ from pathlib import Path
 from git import Repo, InvalidGitRepositoryError, NoSuchPathError
 from .version import __version__
 
-
 def _git_commit():
     try:
         package_dir = Path(__file__).resolve().parent

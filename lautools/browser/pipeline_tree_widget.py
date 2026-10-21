@@ -124,6 +124,7 @@ class PipelineTreeWidget(QWidget):
         self._refresh_thread: Optional[QThread] = None
         self._refresh_worker: Optional[_PipelineRefreshWorker] = None
         self._refresh_pending = False  # coalesce refresh() calls while running
+        self._closing = False  # Flag to indicate if the widget is closing
         
         self._setup_ui()
         
@@ -248,6 +249,8 @@ class PipelineTreeWidget(QWidget):
         flight, this schedules one more refresh to run right after it
         finishes instead of starting overlapping threads.
         """
+        if self._closing:
+            return  # Don't start new refreshes if the widget is closing
         if self.pipeline_manager is None:
             self.status_label.setText("No working directory selected")
             return
@@ -260,6 +263,8 @@ class PipelineTreeWidget(QWidget):
         self._start_refresh_thread()
 
     def _start_refresh_thread(self):
+        if self._closing:
+            return  # Don't start new refreshes if the widget is closing
         self._refresh_pending = False
         self._set_status_bar("running", "Refreshing…")
         self.refresh_btn.setEnabled(False)
@@ -295,6 +300,8 @@ class PipelineTreeWidget(QWidget):
             self._start_refresh_thread()
 
     def _on_refresh_finished(self, entries: List[Dict[str, Any]]):
+        if self._closing:
+            return  # Don't start new refreshes if the widget is closing
         self._populate_tree(entries)
         self.status_label.setText(
             f"Loaded {len(entries)} pipeline entries from "
@@ -303,6 +310,9 @@ class PipelineTreeWidget(QWidget):
         self._set_status_bar("idle", "Idle")
 
     def _on_refresh_error(self, message: str):
+        if self._closing:
+            log.error(f"Error refreshing pipeline while closing: {message}")
+            return
         self.status_label.setText(f"Error loading pipeline: {message}")
         log.error(f"Error refreshing pipeline: {message}")
         self._set_status_bar("error", "Error")
