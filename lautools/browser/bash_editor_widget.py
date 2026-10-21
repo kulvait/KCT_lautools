@@ -85,7 +85,18 @@ def _fmt(color=None, bold=False, italic=False, background=None):
     f.setFontItalic(italic)
     return f
 
+# Create a logger specific to this module
 log = logging.getLogger(__name__)
+log.setLevel(logging.INFO) # Set the logging level to INFO
+# Create a console handler and set its level to INFO
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+# Create a formatter and set it for the handler
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+ch.setFormatter(formatter)
+# Add the handler to the logger
+log.addHandler(ch)
+
 
 
 # ----------------------------------------------------------------------
@@ -141,16 +152,19 @@ class BashSession(QObject):
         if self._path_value:
             env.insert("PATH", self._path_value)
         proc.setProcessEnvironment(env)
+        self._proc = proc
+        self._buffer = ""
+        self._queue.clear()
+        self._current_silent = False
+        self._set_busy(False)
         proc.readyReadStandardOutput.connect(self._on_ready_read)
         proc.finished.connect(self._on_finished)
         proc.start()
         if not proc.waitForStarted(3000):
-            self.info.emit(f"Cannot start bash: {proc.errorString()}")
+            error = proc.errorString()
+            self.stop()
+            self.info.emit(f"Cannot start bash: {error}")
             return False
-        self._proc = proc
-        self._buffer = ""
-        self._queue.clear()
-        self._set_busy(False)
         self.info.emit(f"bash started in {cwd}")
         self.cwdChanged.emit(str(cwd))
         self.started.emit()
@@ -160,6 +174,7 @@ class BashSession(QObject):
         if self._proc is None:
             return
         proc, self._proc = self._proc, None
+        proc.readyReadStandardOutput.disconnect(self._on_ready_read)
         proc.finished.disconnect(self._on_finished)
         if proc.state() != QProcess.NotRunning:
             proc.write(b"exit\n")
@@ -168,6 +183,7 @@ class BashSession(QObject):
                 proc.kill()
                 proc.waitForFinished(1000)
         proc.deleteLater()
+        self._buffer = ""
         self._queue.clear()
         self._set_busy(False)
 
@@ -217,9 +233,11 @@ class BashSession(QObject):
     # -- process callbacks ---------------------------------------------
 
     def _on_ready_read(self):
+        proc = self.sender()
+        if proc is None or proc != self._proc:
+            return
         data = bytes(self._proc.readAllStandardOutput())
         self._buffer += data.decode(errors="replace")
-
         while True:
             idx = self._buffer.find(self._marker)
             if idx < 0:
@@ -242,7 +260,6 @@ class BashSession(QObject):
                 self.commandFinished.emit(int(status) if status.lstrip("-").isdigit() else -1)
             if self._queue:
                 self._send(*self._queue.pop(0))
-
         # Flush everything except a tail that may be the beginning of a marker.
         keep = 0
         idx = self._buffer.find(self._marker)
@@ -259,6 +276,9 @@ class BashSession(QObject):
             self._buffer = self._buffer[len(flush):]
 
     def _on_finished(self, exit_code, _status):
+        proc = self.sender()
+        if proc is None or proc != self._proc:
+            return
         if self._buffer:
             self.output.emit(self._buffer)
             self._buffer = ""
