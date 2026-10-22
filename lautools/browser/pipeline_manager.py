@@ -79,7 +79,7 @@ class PipelineManager:
             try:
                 EXECTUTION_UNIT_DIR = os.path.abspath(execution_unit_dir)
                 EXECUTION_UNIT_NAME = os.path.basename(execution_unit_dir)
-                dag = load_dag(str(execution_unit_dir))
+                dag = load_dag(str(execution_unit_dir), topological_sort=True)
                 for dag_entry in dag:
                     if "execution_unit_dir" not in dag_entry:
                         dag_entry["execution_unit_dir"] = EXECTUTION_UNIT_DIR
@@ -146,6 +146,6 @@ class PipelineManager:
             entries = [ entry for entry in self.DAG_ENTRIES if entry.get("retired", False) is not True]
         if not show_completed:
             entries = [ entry for entry in entries if entry.get("slurm_info", {}).get("State") != "COMPLETED"]
-        #Sort entries by execution unit name, not by step this shall preserve submission order
+        #Sort entries by execution unit name, preserve topological sort order within each execution unit
         entries.sort(key=lambda x: (x.get("execution_unit_name", "")))
         return entries
