@@ -31,11 +31,11 @@ pkg_requires = [
     "zarr",
     "scipy",
     "pandas",
-    "imagecodecs>=2026.8.16",
     "scikit-image",
     "termcolor",
     "platformdirs",
     "GitPython",
+    "imagecodecs",
 ]
 
 extras = {
@@ -52,6 +52,7 @@ extras = {
         "redis",
         "pycuda",
         "pyopencl",
+        "imagecodecs>=2026.8.16",
     ],
 }
 
