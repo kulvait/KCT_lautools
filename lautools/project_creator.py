@@ -165,6 +165,33 @@ def _validate_recipe_instance_directory(recipe_instance_directory: Path) -> Path
     return recipe_instance_directory
 
 
+# Beamtime roles in the order they are listed in INFO, with their metadata field prefix
+BEAMTIME_ROLES = (("PI", "pi"), ("leader", "leader"), ("applicant", "applicant"))
+
+
+def _join_roles(roles: list[str]) -> str:
+    return roles[0] if len(roles) == 1 else ", ".join(roles[:-1]) + " and " + roles[-1]
+
+
+def _beamtime_people_lines(beamtime) -> list[str]:
+    """INFO lines for the PI, leader and applicant, one line per person.
+
+    A person holding several roles is listed once ("Beamtime PI and leader: ...");
+    empty roles are left out, unless all of them are empty.
+    """
+    people: dict[str, tuple[str, list[str]]] = {}  # identity -> (description, roles)
+    for role, prefix in BEAMTIME_ROLES:
+        description = _format_person(beamtime, prefix)
+        if description == "—":  # _format_person of an empty person
+            continue
+        # The same user account is the same person even if e.g. the e-mail differs
+        identity = getattr(beamtime, f"{prefix}_username", None) or description
+        people.setdefault(identity, (description, []))[1].append(role)
+    if not people:
+        return [f"Beamtime {_join_roles([role for role, _ in BEAMTIME_ROLES])}: not given in the metadata"]
+    return [f"Beamtime {_join_roles(roles)}: {description}" for description, roles in people.values()]
+
+
 def _beamtime_summary_text(
     beamtime,
     project_dir: Path,
@@ -177,9 +204,6 @@ def _beamtime_summary_text(
     proposal_id = getattr(beamtime, "proposal_id", None) or beamtime.beamtime_id
     title = getattr(beamtime, "title", None) or ""
     description = getattr(beamtime, "description", None) or ""
-    beamtime_pi = _format_person(beamtime, "pi")
-    beamtime_leader = _format_person(beamtime, "pi")
-    beamtime_applicant = _format_person(beamtime, "pi")
 
     raw_dir = core_path / "raw"
     if raw_dir.is_dir():
@@ -205,12 +229,7 @@ def _beamtime_summary_text(
     lines.append(f"Beamtime root dir: {core_path}")
     lines.append(f"Beamtime ID: {beamtime.beamtime_id}")
     lines.append(f"Proposal ID: {proposal_id}")
-    if beamtime_pi != "-":
-         lines.append(f"Beamtime PI: {beamtime_pi}")
-    if beamtime_leader != "-" and beamtime_leader != beamtime_pi:
-         lines.append(f"Beamtime leader: {beamtime_leader}")
-    if beamtime_applicant != "-" and beamtime_applicant not in {beamtime_pi, beamtime_leader}:
-         lines.append(f"Beamtime applicant: {beamtime_applicant}")
+    lines.extend(_beamtime_people_lines(beamtime))
     if description:
         lines.extend([
             "Beamtime description:",
