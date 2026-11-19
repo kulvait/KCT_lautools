@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import getpass
 import logging
 import html
 import os
@@ -9,6 +10,7 @@ import subprocess
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QFileDialog,
     QInputDialog,
@@ -30,6 +32,15 @@ from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
 from lautools.browser.beamtime_list_dialog import BeamtimeListDialog
 from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
+from lautools.browser.pipeline_manager import (
+    PipelineManager,
+    entry_slurm_id,
+    is_protected_job,
+    list_user_slurm_jobs,
+    protected_slurm_job_ids,
+    scancel_jobs,
+)
+from lautools.browser.job_selection_dialog import JobRow, JobSelectionDialog
 from lautools.browser.bash_editor_widget import BashEditorWidget
 from lautools.browser.project_manager import ProjectManager
 from lautools.browser.new_project_from_recipe_dialog import (NewProjectFromRecipeDialog,)
@@ -163,6 +174,9 @@ class BrowserWindow(QMainWindow):
         # Switch
         self.switch_menu = menu_bar.addMenu("&Switch")
         self.switch_menu.aboutToShow.connect(self._populate_switch_menu)
+        # Jobs
+        self.jobs_menu = menu_bar.addMenu("&Jobs")
+        self.jobs_menu.aboutToShow.connect(self._populate_jobs_menu)
         # Help
         help_menu = menu_bar.addMenu("&Help")
         repository_action = help_menu.addAction("Project Repository")
@@ -458,6 +472,233 @@ class BrowserWindow(QMainWindow):
 
         self._activate_project(project)
 
+    # ------------------------------------------------------------------
+    # Jobs menu
+    # ------------------------------------------------------------------
+
+    def _populate_jobs_menu(self):
+        self.jobs_menu.clear()
+        self.jobs_menu.setToolTipsVisible(True)
+        workspace = self.current_workspace
+        has_workspace = (self.current_project is not None and workspace is not None and workspace.path.is_dir())
+        workspace_name = workspace.name if has_workspace else "workspace"
+
+        retire_action = self.jobs_menu.addAction(f"Retire jobs in {workspace_name}...")
+        retire_action.setEnabled(has_workspace)
+        retire_action.setToolTip("Same as: pipeline retire -w <workspace>\n"
+                                 "Marks FAILED, CANCELLED and TIMEOUT jobs as retired.")
+        retire_action.triggered.connect(self.retire_all_jobs)
+
+        cancel_action = self.jobs_menu.addAction(f"Cancel jobs in {workspace_name}...")
+        cancel_action.setEnabled(has_workspace)
+        cancel_action.setToolTip("Same as: pipeline cancel -w <workspace>\n"
+                                 "Cancels PENDING, RUNNING, REQUEUED and COMPLETING jobs of this workspace's pipelines.")
+        cancel_action.triggered.connect(self.cancel_all_jobs)
+
+        self.jobs_menu.addSeparator()
+
+        # Independent of the current project: affects every pipeline of the user.
+        scancel_action = self.jobs_menu.addAction(f"scancel SLURM jobs of user {getpass.getuser()}...")
+        scancel_action.setToolTip("Runs scancel on every job of the user, bypassing the pipeline DAGs.\n"
+                                  "Jobs fail in every pipeline; retire them per workspace afterwards.")
+        scancel_action.triggered.connect(self.scancel_all_user_jobs_dialog)
+
+    def _jobs_pipeline_manager(self) -> PipelineManager | None:
+        if self.current_project is None or self.current_workspace is None:
+            self.status_label.setText("No workspace selected")
+            return None
+        if not self.current_workspace.path.is_dir():
+            self.status_label.setText("Selected working directory does not exist")
+            return None
+        return PipelineManager(self.current_workspace.path)
+
+    def _run_busy(self, func):
+        """Run a blocking job operation with a wait cursor."""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return func()
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _report_job_errors(self, title: str, errors: list[str]):
+        """Only problems get a popup; success is reported in the status bar."""
+        if not errors:
+            return
+        message = QMessageBox(self)
+        message.setWindowTitle(title)
+        message.setIcon(QMessageBox.Warning)
+        message.setText(f"{len(errors)} problem(s) occurred:\n\n" + "\n".join(errors[:5])
+                        + ("\n..." if len(errors) > 5 else ""))
+        if len(errors) > 5:
+            message.setDetailedText("\n".join(errors))
+        message.exec()
+
+    def _refresh_pipeline_status(self):
+        if self.current_workspace is not None:
+            self.pipeline_status_tree.refresh()
+
+    @staticmethod
+    def _dag_entry_row(index: int, entry: dict) -> JobRow:
+        info = entry.get("slurm_info", {})
+        state = info.get("State", "UNKNOWN")
+        if state == "RUNNING":
+            detail = info.get("NodeList") or ""
+        elif state == "PENDING":
+            detail = info.get("Reason") or ""
+        else:
+            detail = f"exit {info.get('ExitCode')}" if info.get("ExitCode") else ""
+        elapsed = info.get("Elapsed") or ""
+        limit = info.get("Timelimit") or ""
+        tooltip = "\n".join(part for part in (
+            f"Execution unit: {entry.get('execution_unit_dir', '')}",
+            f"Command: {entry.get('command', '')}" if entry.get("command") else "",
+            f"StdOut: {info.get('StdOut')}" if info.get("StdOut") else "",
+            f"StdErr: {info.get('StdErr')}" if info.get("StdErr") else "",
+        ) if part)
+        return JobRow(
+            key=index,
+            values=[
+                entry.get("execution_unit_name", ""),
+                str(entry.get("dag_node_name", entry.get("step", ""))),
+                str(entry_slurm_id(entry) or ""),
+                info.get("JobName") or "",
+                state,
+                f"{elapsed} / {limit}" if limit else elapsed,
+                detail,
+            ],
+            state=state,
+            tooltip=tooltip,
+        )
+
+    COMPLETING_WARNING = (
+        "This job is in state COMPLETING.\n\n"
+        "COMPLETING is normally very short: the job has already finished and SLURM is "
+        "cleaning up (epilog, flushing output, releasing nodes). It resolves by itself.\n\n"
+        "Cancel it only if it is stuck in COMPLETING for a long time.\n\n"
+        "Select it for cancellation anyway?"
+    )
+
+    @classmethod
+    def _apply_completing_policy(cls, row: JobRow) -> JobRow:
+        """COMPLETING jobs are listed but unticked; ticking one asks for confirmation."""
+        if row.state == "COMPLETING" and row.selectable:
+            row.checked = False
+            row.check_warning = cls.COMPLETING_WARNING
+            row.tooltip = "\n".join(filter(None, [row.tooltip, "COMPLETING is transient; cancel only if stuck."]))
+        return row
+
+    _DAG_JOB_HEADERS = ["Execution unit", "Node", "SLURM ID", "Job name", "State", "Elapsed / limit", "Nodes / reason / exit"]
+
+    def _select_dag_entries(self, collect, title: str, description: str, action_label: str, destructive: bool,
+                            row_policy=None):
+        """Collect candidate DAG entries and let the user pick. Returns (manager, entries) or None."""
+        manager = self._jobs_pipeline_manager()
+        if manager is None:
+            return None
+        try:
+            candidates, errors = self._run_busy(lambda: collect(manager))
+        except Exception as exc:
+            log.exception("Cannot collect jobs in %s", manager.WORKING_DIR)
+            QMessageBox.critical(self, title, f"Cannot read pipeline jobs:\n{exc}")
+            return None
+        if not candidates:
+            self.status_label.setText(f"{title}: nothing to do in {self.current_workspace.name}")
+            self._report_job_errors(title, errors)
+            return None
+        if errors:
+            description += "\n\nSome execution units could not be read:\n" + "\n".join(errors)
+        rows = [self._dag_entry_row(i, entry) for i, entry in enumerate(candidates)]
+        if row_policy is not None:
+            rows = [row_policy(row) for row in rows]
+        dialog = JobSelectionDialog(
+            title, description, self._DAG_JOB_HEADERS, rows,
+            action_label, state_column=4, destructive=destructive, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return manager, [candidates[i] for i in dialog.selected_keys()]
+
+    def retire_all_jobs(self):
+        name = self.current_workspace.name if self.current_workspace else ""
+        selection = self._select_dag_entries(
+            PipelineManager.retire_candidates,
+            "Retire jobs",
+            f"Failed, cancelled and timed out pipeline jobs in {name} "
+            f"(as: pipeline retire -w {name}).\n"
+            "Retired jobs are hidden from the status view and no longer block resubmission.",
+            "Retire selected",
+            destructive=False,
+        )
+        if selection is None:
+            return
+        manager, entries = selection
+        errors = self._run_busy(lambda: manager.retire_entries(entries))
+        self.status_label.setText(f"Retired {len(entries)} job(s) in {name}")
+        self._report_job_errors("Retire jobs", errors)
+        self._refresh_pipeline_status()
+
+    def cancel_all_jobs(self):
+        name = self.current_workspace.name if self.current_workspace else ""
+        selection = self._select_dag_entries(
+            PipelineManager.cancel_candidates,
+            "Cancel jobs",
+            f"Submitted and running pipeline jobs in {name} (as: pipeline cancel -w {name}).\n"
+            "Selected jobs are cancelled with scancel and recorded as CANCELLED; "
+            "retire them afterwards with Retire.\n"
+            "COMPLETING jobs are not selected by default: that state is normally transient.",
+            "scancel selected",
+            destructive=True,
+            row_policy=self._apply_completing_policy,
+        )
+        if selection is None:
+            return
+        manager, entries = selection
+        errors = self._run_busy(lambda: manager.cancel_entries(entries))
+        self.status_label.setText(f"Cancelled {len(entries)} job(s) in {name}")
+        self._report_job_errors("Cancel jobs", errors)
+        self._refresh_pipeline_status()
+
+    def scancel_all_user_jobs_dialog(self):
+        user = getpass.getuser()
+        title = f"scancel jobs of {user}"
+        try:
+            jobs = self._run_busy(lambda: list_user_slurm_jobs(user))
+        except (OSError, subprocess.CalledProcessError) as exc:
+            log.exception("Cannot list SLURM jobs of %s", user)
+            QMessageBox.critical(self, title, f"Cannot list SLURM jobs of {user}:\n{exc}")
+            return
+        if not jobs:
+            self.status_label.setText(f"No SLURM jobs of {user} in the queue")
+            return
+        protected = protected_slurm_job_ids()
+        rows = []
+        for job in jobs:
+            own = is_protected_job(job["JobID"], protected)
+            rows.append(self._apply_completing_policy(JobRow(
+                key=job["JobID"],
+                values=[job["JobID"], job["JobName"], job["State"], job["Partition"],
+                        f"{job['Elapsed']} / {job['Timelimit']}", job["Reason"], job["SubmitTime"], job["WorkDir"]],
+                state=job["State"],
+                selectable=not own,
+                tooltip="This browser runs inside this allocation; it is never cancelled." if own else job["WorkDir"],
+            )))
+        dialog = JobSelectionDialog(
+            title,
+            f"All queued and running SLURM jobs of {user}, from every project and pipeline, "
+            "including jobs not submitted by laupy.\n"
+            "scancel is called directly, without updating any pipeline DAG: affected pipeline "
+            "steps show up as CANCELLED and can be retired per workspace afterwards.\n"
+            "COMPLETING jobs are not selected by default: that state is normally transient.",
+            ["SLURM ID", "Job name", "State", "Partition", "Elapsed / limit", "Nodes / reason", "Submitted", "Work dir"],
+            rows, "scancel selected", state_column=2, destructive=True, parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        job_ids = dialog.selected_keys()
+        error = self._run_busy(lambda: scancel_jobs(job_ids))
+        self.status_label.setText(f"scancel issued for {len(job_ids)} job(s) of {user}")
+        self._report_job_errors(title, [error] if error else [])
+        self._refresh_pipeline_status()
 
     # ------------------------------------------------------------------
     # Main UI
