@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from lautools.collection_manager import CollectionManager
 from lautools.project_creator import create_project
+from lautools.browser.recipe_sync_dialog import check_cookbook_in_background, offer_cookbook_fast_forward
 
 RESERVED_BEAMTIME_NAMES = ("raw", "processed", "scratch_cc", "shared")
 
@@ -264,6 +265,8 @@ class NewProjectFromRecipeDialog(QDialog):
 
             for recipe_instance in recipe_instances:
                 self.recipe_combo.addItem(recipe_instance.name, recipe_instance)
+            # Before copying a recipe, offer to update a cookbook that is behind its remote
+            check_cookbook_in_background(Path(self._cookbook_root), self, self._cookbook_checked)
 
             if not recipe_instances:
                 raise ValueError(
@@ -275,6 +278,19 @@ class NewProjectFromRecipeDialog(QDialog):
         except Exception as exc:
             self.status.setText(str(exc))
             self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+
+    def _cookbook_checked(self, status):
+        if not offer_cookbook_fast_forward(self, status):
+            return
+        # Reload the recipe list: the merge may have added recipes
+        current = self.recipe_combo.currentText()
+        self.recipe_combo.clear()
+        for recipe_instance in self.collection_manager.sync_recipe_instances_from_disk(self._cookbook_collection_id):
+            self.recipe_combo.addItem(recipe_instance.name, recipe_instance)
+        index = self.recipe_combo.findText(current)
+        if index >= 0:
+            self.recipe_combo.setCurrentIndex(index)
+        self.status.setText(f"Cookbook updated from {status.upstream_ref}.")
 
     @staticmethod
     def _path_label():

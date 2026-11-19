@@ -52,6 +52,7 @@ from lautools import about as lautools_about
 from lautools.browser.size_service_qt import SizeServiceBridge
 from lautools.size_service import SizeEventKind, SizeService
 from lautools.browser.path_editor_dialog import PathEditorDialog
+from lautools.browser.recipe_sync_dialog import RecipeStatusButton
 from lautools.browser.path_manager import PathManager
 
 PROJECT_REPOSITORY_URL = "https://github.com/kulvait/KCT_lautools"
@@ -222,6 +223,9 @@ class BrowserWindow(QMainWindow):
                 upstream_name = self.current_project_recipes["upstream_instance"].name or ""
                 self._add_open_action(self.project_menu, f"Open Terminal for upstream recipe {upstream_name}", self.current_project_recipes["upstream_instance_path"], open_terminal)
                 self._add_open_action(self.project_menu, f"Open Thunar for upstream recipe {upstream_name}", self.current_project_recipes["upstream_instance_path"], open_thunar)
+            compare_action = self.project_menu.addAction("Compare recipe with upstream...")
+            compare_action.setToolTip("Differences between the project's recipe copy and the cookbook recipe; backport files, update the cookbook")
+            compare_action.triggered.connect(self.compare_project_recipe)
             if (self.current_project.path / "sbatch").is_dir():
                 self._add_open_action(self.project_menu, "Open terminal in sbatch", (self.current_project.path / "sbatch").resolve(), open_terminal)
             if (self.current_project.path / "INFO").is_file():
@@ -854,7 +858,12 @@ class BrowserWindow(QMainWindow):
         self.status_label = QLabel("Ready")
         self.location_status = QLabel("No project selected")
 
+        # Cookbook / project recipe state; click opens Compare recipe with upstream
+        self.recipe_status = RecipeStatusButton(self.db)
+        self._recipe_status_project_id = None
+
         self.status_bar.addWidget(self.status_label)
+        self.status_bar.addPermanentWidget(self.recipe_status)
         self.status_bar.addPermanentWidget(self.location_status)
 
 
@@ -1233,6 +1242,12 @@ class BrowserWindow(QMainWindow):
                 f"Selected project: "
                 f"{self.current_project.name}"
             )
+
+        # Check the cookbook and recipe state when the project changes
+        project_id = self.current_project.id if self.current_project is not None else None
+        if project_id != self._recipe_status_project_id:
+            self._recipe_status_project_id = project_id
+            self.recipe_status.set_project(self.current_project)
 
         self._update_window_title()
         self._update_action_states()
@@ -1916,9 +1931,16 @@ class BrowserWindow(QMainWindow):
     #------------------------------------------------------------------
     # Path handling
     #------------------------------------------------------------------
-    def edit_project_path(self):
+    def compare_project_recipe(self):
+        if self.current_project is None:
+            return
+        self.recipe_status.open_compare_dialog()  # refreshes the status bar afterwards
+        self._update_current_project_ui()  # an inferred link may have been stored
+
+    def edit_project_path(self, parent=None):
+        """PATH editor for the current project; parent is e.g. the Configure Project dialog."""
         project_id = (self.current_project.id if self.current_project else None)
-        dialog = PathEditorDialog(self.db, project_id, parent=self)
+        dialog = PathEditorDialog(self.db, project_id, parent=parent or self)
         if dialog.exec() == QDialog.Accepted:
             self._apply_project_path()
             self.status_label.setText("PATH saved; terminal update queued")

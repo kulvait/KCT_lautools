@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from lautools.browser.size_service_qt import SizeServiceBridge
+from lautools.browser.recipe_sync_dialog import RecipeStatusButton
 from lautools.browser.utils import open_terminal
 from lautools.size_service import (
     BEAMTIME_AREAS,
@@ -272,7 +273,16 @@ class ProjectConfigDialog(QDialog):
         path_label = QLabel(str(self.project.path))
         path_label.setWordWrap(True)
         path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        form.addRow("Path:", path_label)
+        self.open_project_terminal_button = QPushButton("Open terminal")
+        self.open_project_terminal_button.setToolTip("Terminal in the project root (wd* directories, recipe links)")
+        self.open_project_terminal_button.clicked.connect(self._open_project_terminal)
+        self.open_project_terminal_button.setEnabled(Path(self.project.path).is_dir())
+        path_widget = QWidget()
+        path_layout = QHBoxLayout(path_widget)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.addWidget(path_label, 1)
+        path_layout.addWidget(self.open_project_terminal_button)
+        form.addRow("Path:", path_widget)
 
         self.project_exists_label = QLabel("")
         form.addRow("Folder exists:", self.project_exists_label)
@@ -285,6 +295,10 @@ class ProjectConfigDialog(QDialog):
         self.recipe_path_label.setWordWrap(True)
         self.recipe_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         form.addRow("Recipe folder:", self.recipe_path_label)
+
+        self.recipe_status_button = RecipeStatusButton(self.project_manager.db, hide_without_recipe=False)
+        self.recipe_status_button.set_project(self.project)
+        form.addRow("Recipe status:", self.recipe_status_button)
 
         self.description_edit = QPlainTextEdit(self.project.description or "")
         self.description_edit.setMaximumHeight(100)
@@ -308,6 +322,12 @@ class ProjectConfigDialog(QDialog):
         form.addRow("Size:", size_widget)
 
         return box
+
+    def _open_project_terminal(self) -> None:
+        def on_error(error):
+            self.disk_warning_label.setText(f"Error: {error}")
+            self.disk_warning_label.setVisible(True)
+        open_terminal(self.project.path, on_error=on_error)
 
     def _create_beamtime_box(self) -> QGroupBox:
         box = QGroupBox("Beamtime")
@@ -1061,6 +1081,7 @@ class ProjectConfigDialog(QDialog):
             format_flag(health.project_exists),
             health.project_exists is False,
         )
+        self.open_project_terminal_button.setEnabled(health.project_exists is not False)
         if health.project_exists is False:
             warnings.append(f"Project folder is missing: {self.project.path}")
 
