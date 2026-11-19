@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import getpass
 import logging
+import shutil
 import html
 import os
 from pathlib import Path
@@ -32,15 +33,11 @@ from lautools.browser.project_config_dialog import ProjectConfigDialog
 from lautools.browser.beamtime_info_dialog import BeamtimeInfoDialog
 from lautools.browser.beamtime_list_dialog import BeamtimeListDialog
 from lautools.browser.pipeline_tree_widget import PipelineTreeWidget
-from lautools.browser.pipeline_manager import (
-    PipelineManager,
-    entry_slurm_id,
-    is_protected_job,
-    list_user_slurm_jobs,
-    protected_slurm_job_ids,
-    scancel_jobs,
-)
+from lautools.browser.pipeline_manager import PipelineManager
+from laupy.pipeline_entries import entry_slurm_id
+from laupy.slurm import TRANSIENT_STATES, is_own_allocation, list_user_jobs, own_allocation_job_ids, scancel
 from lautools.browser.job_selection_dialog import JobRow, JobSelectionDialog
+from lautools.browser.text_viewer import open_text_viewer
 from lautools.browser.bash_editor_widget import BashEditorWidget
 from lautools.browser.project_manager import ProjectManager
 from lautools.browser.new_project_from_recipe_dialog import (NewProjectFromRecipeDialog,)
@@ -538,7 +535,7 @@ class BrowserWindow(QMainWindow):
             self.pipeline_status_tree.refresh()
 
     @staticmethod
-    def _dag_entry_row(index: int, entry: dict) -> JobRow:
+    def _entry_row(index: int, entry: dict) -> JobRow:
         info = entry.get("slurm_info", {})
         state = info.get("State", "UNKNOWN")
         if state == "RUNNING":
@@ -550,7 +547,7 @@ class BrowserWindow(QMainWindow):
         elapsed = info.get("Elapsed") or ""
         limit = info.get("Timelimit") or ""
         tooltip = "\n".join(part for part in (
-            f"Execution unit: {entry.get('execution_unit_dir', '')}",
+            f"Processing unit: {entry.get('processing_unit_subdir', '')}",
             f"Command: {entry.get('command', '')}" if entry.get("command") else "",
             f"StdOut: {info.get('StdOut')}" if info.get("StdOut") else "",
             f"StdErr: {info.get('StdErr')}" if info.get("StdErr") else "",
@@ -558,7 +555,7 @@ class BrowserWindow(QMainWindow):
         return JobRow(
             key=index,
             values=[
-                entry.get("execution_unit_name", ""),
+                entry.get("processing_unit_name", ""),
                 str(entry.get("dag_node_name", entry.get("step", ""))),
                 str(entry_slurm_id(entry) or ""),
                 info.get("JobName") or "",
@@ -581,15 +578,15 @@ class BrowserWindow(QMainWindow):
     @classmethod
     def _apply_completing_policy(cls, row: JobRow) -> JobRow:
         """COMPLETING jobs are listed but unticked; ticking one asks for confirmation."""
-        if row.state == "COMPLETING" and row.selectable:
+        if row.state in TRANSIENT_STATES and row.selectable:
             row.checked = False
             row.check_warning = cls.COMPLETING_WARNING
             row.tooltip = "\n".join(filter(None, [row.tooltip, "COMPLETING is transient; cancel only if stuck."]))
         return row
 
-    _DAG_JOB_HEADERS = ["Execution unit", "Node", "SLURM ID", "Job name", "State", "Elapsed / limit", "Nodes / reason / exit"]
+    _ENTRY_HEADERS = ["Subdir", "Node", "SLURM ID", "Job name", "State", "Elapsed / limit", "Nodes / reason / exit"]
 
-    def _select_dag_entries(self, collect, title: str, description: str, action_label: str, destructive: bool,
+    def _select_entries(self, collect, title: str, description: str, action_label: str, destructive: bool,
                             row_policy=None):
         """Collect candidate DAG entries and let the user pick. Returns (manager, entries) or None."""
         manager = self._jobs_pipeline_manager()
@@ -606,12 +603,12 @@ class BrowserWindow(QMainWindow):
             self._report_job_errors(title, errors)
             return None
         if errors:
-            description += "\n\nSome execution units could not be read:\n" + "\n".join(errors)
-        rows = [self._dag_entry_row(i, entry) for i, entry in enumerate(candidates)]
+            description += "\n\nSome processing units could not be read:\n" + "\n".join(errors)
+        rows = [self._entry_row(i, entry) for i, entry in enumerate(candidates)]
         if row_policy is not None:
             rows = [row_policy(row) for row in rows]
         dialog = JobSelectionDialog(
-            title, description, self._DAG_JOB_HEADERS, rows,
+            title, description, self._ENTRY_HEADERS, rows,
             action_label, state_column=4, destructive=destructive, parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
@@ -620,7 +617,7 @@ class BrowserWindow(QMainWindow):
 
     def retire_all_jobs(self):
         name = self.current_workspace.name if self.current_workspace else ""
-        selection = self._select_dag_entries(
+        selection = self._select_entries(
             PipelineManager.retire_candidates,
             "Retire jobs",
             f"Failed, cancelled and timed out pipeline jobs in {name} "
@@ -632,14 +629,14 @@ class BrowserWindow(QMainWindow):
         if selection is None:
             return
         manager, entries = selection
-        errors = self._run_busy(lambda: manager.retire_entries(entries))
+        errors = self._run_busy(lambda: manager.retire_pipeline_entries(entries))
         self.status_label.setText(f"Retired {len(entries)} job(s) in {name}")
         self._report_job_errors("Retire jobs", errors)
         self._refresh_pipeline_status()
 
     def cancel_all_jobs(self):
         name = self.current_workspace.name if self.current_workspace else ""
-        selection = self._select_dag_entries(
+        selection = self._select_entries(
             PipelineManager.cancel_candidates,
             "Cancel jobs",
             f"Submitted and running pipeline jobs in {name} (as: pipeline cancel -w {name}).\n"
@@ -653,7 +650,7 @@ class BrowserWindow(QMainWindow):
         if selection is None:
             return
         manager, entries = selection
-        errors = self._run_busy(lambda: manager.cancel_entries(entries))
+        errors = self._run_busy(lambda: manager.cancel_pipeline_entries(entries))
         self.status_label.setText(f"Cancelled {len(entries)} job(s) in {name}")
         self._report_job_errors("Cancel jobs", errors)
         self._refresh_pipeline_status()
@@ -662,7 +659,7 @@ class BrowserWindow(QMainWindow):
         user = getpass.getuser()
         title = f"scancel jobs of {user}"
         try:
-            jobs = self._run_busy(lambda: list_user_slurm_jobs(user))
+            jobs = self._run_busy(lambda: list_user_jobs(user))
         except (OSError, subprocess.CalledProcessError) as exc:
             log.exception("Cannot list SLURM jobs of %s", user)
             QMessageBox.critical(self, title, f"Cannot list SLURM jobs of {user}:\n{exc}")
@@ -670,10 +667,10 @@ class BrowserWindow(QMainWindow):
         if not jobs:
             self.status_label.setText(f"No SLURM jobs of {user} in the queue")
             return
-        protected = protected_slurm_job_ids()
+        protected = own_allocation_job_ids()
         rows = []
         for job in jobs:
-            own = is_protected_job(job["JobID"], protected)
+            own = is_own_allocation(job["JobID"], protected)
             rows.append(self._apply_completing_policy(JobRow(
                 key=job["JobID"],
                 values=[job["JobID"], job["JobName"], job["State"], job["Partition"],
@@ -695,7 +692,7 @@ class BrowserWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         job_ids = dialog.selected_keys()
-        error = self._run_busy(lambda: scancel_jobs(job_ids))
+        error = self._run_busy(lambda: scancel(job_ids))
         self.status_label.setText(f"scancel issued for {len(job_ids)} job(s) of {user}")
         self._report_job_errors(title, [error] if error else [])
         self._refresh_pipeline_status()
@@ -816,7 +813,7 @@ class BrowserWindow(QMainWindow):
     def _create_status_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        self.pipeline_status_tree = PipelineTreeWidget(environment_provider=self._pipeline_job_environment,)
+        self.pipeline_status_tree = PipelineTreeWidget(environment_provider=self._pipeline_job_environment, settings=self.db)
         layout.addWidget(self.pipeline_status_tree)
         return widget
 
@@ -1179,25 +1176,14 @@ class BrowserWindow(QMainWindow):
 
         menu.addSeparator()
 
-        params_file = folder_path / "params"
-        if params_file.is_file():
-            menu.addAction(
-                "Open params",
-                lambda: open_files_mousepad(
-                    [params_file],
-                    on_error=on_error,
-                ),
-            )
-
-        param_json_file = folder_path / "param.json"
-        if param_json_file.is_file():
-            menu.addAction(
-                "Open param.json",
-                lambda: open_files_mousepad(
-                    [param_json_file],
-                    on_error=on_error,
-                ),
-            )
+        # Parameter files open in the built-in editor, ready for editing.
+        param_files = [path for path in (folder_path / "params", folder_path / "param.json") if path.is_file()]
+        for param_file in param_files:
+            menu.addAction(f"Open {param_file.name}",
+                           lambda p=param_file: open_text_viewer([p], editable=True))
+        if param_files and shutil.which("mousepad"):
+            menu.addAction("Open parameter files in mousepad",
+                           lambda: open_files_mousepad([str(p) for p in param_files], on_error=on_error))
 
         h5_file = folder_path / "h5"
         if h5_file.is_file():

@@ -4,14 +4,21 @@ Accepts configuration from other widgets.
 """
 
 from pathlib import Path
-import subprocess
+import json
+import shutil
 from typing import Any, Dict, List, Optional
 import shlex
 import os
 import logging
 
 from PySide6.QtCore import Qt, QTimer, QProcess, QThread, QObject, Signal
+import time
+
 from PySide6.QtWidgets import (
+    QComboBox,
+    QStyle,
+    QStyleOptionButton,
+    QStylePainter,
     QApplication,
     QWidget,
     QVBoxLayout,
@@ -24,11 +31,13 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
 )
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette, QPen
 
 from lautools.browser.pipeline_manager import PipelineManager
-from laupy.flow import load_dag, save_dag, clean_dag
-from laupy.flow import update_dag_entries, resubmit_slurm_job
+from laupy.pipeline_entries import PipelineEntriesStore, cancel_selected, entry_slurm_id, retire_selected
+from laupy.flow import resubmit_slurm_job
+from laupy.slurm import scancel
+from lautools.browser.text_viewer import TextSource, open_text_viewer
 
 from lautools.browser.utils import open_files_mousepad, open_terminal, open_files_vim
 
@@ -59,6 +68,68 @@ STATE_COLORS = {
     "REQUEUED": QColor(255, 165, 0),     # Orange
     "COMPLETING": QColor(255, 165, 0),   # Orange
 }
+
+# Auto refresh choices (label, seconds; 0 = off). Every refresh runs one
+# batched sacct + squeue query for the whole working directory; SLURM sites
+# discourage tight polling loops and pipeline jobs run for minutes to hours.
+AUTO_REFRESH_CHOICES = [("Off", 0), ("10 s", 10), ("30 s", 30), ("1 min", 60), ("2 min", 120)]
+DEFAULT_AUTO_REFRESH_S = 30
+AUTO_REFRESH_SETTING = "pipeline_status.auto_refresh_s"
+COUNTDOWN_TICK_MS = 100
+# Showing the tab: a click-like flash of the Refresh button and a refresh after a short delay
+SHOW_REFRESH_DELAY_MS = 150
+FLASH_DURATION_MS = 910
+
+
+class CountdownButton(QPushButton):
+    """Push button whose background fills up as the next auto refresh approaches.
+
+    progress: 0..1 fraction of the interval elapsed, or None for no fill.
+    busy: a band sweeps across the button while a refresh is running.
+    """
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self._progress = None
+        self._busy = False
+        self._flash_until = 0.0
+
+    def flash(self, duration_ms: int = FLASH_DURATION_MS):
+        """Click-like feedback: a 3 px outline for a moment."""
+        self._flash_until = time.monotonic() + duration_ms / 1000.0
+        self.update()
+        QTimer.singleShot(duration_ms + 20, self.update)
+
+    def set_countdown(self, progress, busy: bool = False):
+        if progress != self._progress or busy or busy != self._busy:
+            self._progress, self._busy = progress, busy
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QStylePainter(self)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        painter.drawControl(QStyle.CE_PushButtonBevel, option)
+        inner = self.style().subElementRect(QStyle.SE_PushButtonContents, option, self)
+        # Active colour group: the button is disabled while a refresh runs, the band must stay visible
+        fill = QColor(self.palette().color(QPalette.Active, QPalette.Highlight))
+        if self._busy:
+            fill.setAlpha(110)
+            # A band one third of the width sweeps left to right, ~1.2 passes per second
+            band = max(inner.width() // 3, 1)
+            start = inner.x() - band + int((time.monotonic() * 1.2 % 1.0) * (inner.width() + band))
+            left, right = max(start, inner.x()), min(start + band, inner.x() + inner.width())
+            if right > left:
+                painter.fillRect(left, inner.y(), right - left, inner.height(), fill)
+        elif self._progress is not None and self.isEnabled():
+            fill.setAlpha(70)
+            painter.fillRect(inner.x(), inner.y(), int(inner.width() * min(max(self._progress, 0.0), 1.0)), inner.height(), fill)
+        painter.drawControl(QStyle.CE_PushButtonLabel, option)
+        if time.monotonic() < self._flash_until:
+            pen = QPen(QColor(self.palette().color(QPalette.Active, QPalette.Highlight)), 3)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 3, 3)  # 3 px line fully inside the button
 
 # Colors used for the busy/status indicator bar
 STATUS_BAR_COLORS = {
@@ -104,12 +175,19 @@ class PipelineTreeWidget(QWidget):
     Configuration can be passed from external widgets:
     - show_completed: bool
     - show_retired: bool
-    - auto_refresh_interval: int (milliseconds)
+    - auto_refresh_interval: int (seconds, 0 = off)
+
+    Auto refresh runs only while the widget is visible (its tab is current
+    and the window is not minimized); stale data is refreshed as soon as it
+    becomes visible again. The Refresh button background fills up towards
+    the next refresh. The interval is stored in ``settings`` (an object with
+    get_app_setting/set_app_setting, e.g. the lautools database) if given.
     """
     
-    def __init__(self, parent=None, *, environment_provider=None):
+    def __init__(self, parent=None, *, environment_provider=None, settings=None):
         super().__init__(parent)
         self.environment_provider = environment_provider
+        self.settings = settings
         self.pipeline_manager: Optional[PipelineManager] = None
         self.current_working_dir: Optional[Path] = None
         
@@ -126,10 +204,17 @@ class PipelineTreeWidget(QWidget):
         self._refresh_pending = False  # coalesce refresh() calls while running
         self._closing = False  # Flag to indicate if the widget is closing
         
+        # Auto refresh: countdown from the end of the last refresh
+        self._auto_refresh_s = self._stored_auto_refresh()
+        self._last_refresh_end = time.monotonic()
+        self._show_refresh_pending = False  # the show-triggered refresh owns the next refresh
+
         self._setup_ui()
-        
-        self.refresh_timer = QTimer()
-        self.refresh_timer.timeout.connect(self.refresh)
+
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.setInterval(COUNTDOWN_TICK_MS)
+        self._countdown_timer.timeout.connect(self._on_countdown_tick)
+        self._countdown_timer.start()
         
     def _setup_ui(self):
         """Create the UI components."""
@@ -144,12 +229,15 @@ class PipelineTreeWidget(QWidget):
         self.show_retired_check = QCheckBox("Show Retired")
         self.show_retired_check.stateChanged.connect(self._on_show_retired_changed)
         
-        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn = CountdownButton("Refresh")
         self.refresh_btn.clicked.connect(self.refresh)
         
-        auto_refresh_btn = QPushButton("Auto Refresh (5s)")
-        auto_refresh_btn.clicked.connect(self._toggle_auto_refresh)
-        self.auto_refresh_btn = auto_refresh_btn
+        self.auto_refresh_combo = QComboBox()
+        for label, seconds in AUTO_REFRESH_CHOICES:
+            self.auto_refresh_combo.addItem(label, seconds)
+        self.auto_refresh_combo.setCurrentIndex(self.auto_refresh_combo.findData(self._auto_refresh_s))
+        self.auto_refresh_combo.setToolTip("Auto refresh interval; paused while this tab is not visible")
+        self.auto_refresh_combo.currentIndexChanged.connect(self._on_auto_refresh_changed)
         
         toolbar_layout.addWidget(QLabel("Filter:"))
         toolbar_layout.addWidget(self.show_completed_check)
@@ -165,7 +253,8 @@ class PipelineTreeWidget(QWidget):
         toolbar_layout.addWidget(self.status_bar)
 
         toolbar_layout.addWidget(self.refresh_btn)
-        toolbar_layout.addWidget(auto_refresh_btn)
+        toolbar_layout.addWidget(QLabel("Auto:"))
+        toolbar_layout.addWidget(self.auto_refresh_combo)
         
         layout.addLayout(toolbar_layout)
         
@@ -173,7 +262,7 @@ class PipelineTreeWidget(QWidget):
         self.tree = QTreeWidget()
         self.tree.setColumnCount(6)
         self.tree.setHeaderLabels([
-            "Execution Unit",
+            "Subdir",
             "Step/Node",
             "Slurm ID",
             "Name",
@@ -190,7 +279,7 @@ class PipelineTreeWidget(QWidget):
         self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         
         layout.addWidget(self.tree)
-        
+
         # Status label
         self.status_label = QLabel("No pipeline loaded")
         layout.addWidget(self.status_label)
@@ -294,6 +383,7 @@ class PipelineTreeWidget(QWidget):
     def _on_thread_finished(self):
         self._refresh_thread = None
         self._refresh_worker = None
+        self._last_refresh_end = time.monotonic()  # countdown restarts after each refresh
         self.refresh_btn.setEnabled(True)
         if self._refresh_pending:
             # Another refresh was requested while this one was running.
@@ -332,8 +422,8 @@ class PipelineTreeWidget(QWidget):
     
     def _create_entry_item(self, entry: Dict[str, Any]) -> QTreeWidgetItem:
         """Create a tree item for a pipeline entry."""
-        execution_unit = entry.get("execution_unit_name", "N/A")
-        execution_unit_dir = entry.get("execution_unit_dir", "N/A")
+        processing_unit = entry.get("processing_unit_name", "N/A")
+        processing_unit_subdir = entry.get("processing_unit_subdir", "N/A")
         step = entry.get("step", "N/A")
         job_id = entry.get("job_id", "N/A")
         slurm_info = entry.get("slurm_info", {})
@@ -348,7 +438,7 @@ class PipelineTreeWidget(QWidget):
         stderr_file = slurm_info.get("StdErr", None)
         
         item = QTreeWidgetItem([
-            str(execution_unit),
+            str(processing_unit),
             str(dag_node_name),
             str(slurm_id),
             job_name,
@@ -363,11 +453,11 @@ class PipelineTreeWidget(QWidget):
         for col in range(item.columnCount()):
             item.setBackground(col, color)
 
-        #Add execution unit directory as a tooltip and sub-item
-        if execution_unit is not None:
-            item.setToolTip(0, str(execution_unit_dir))
-            execution_unit_item = QTreeWidgetItem(["", "", "Execution dir", str(execution_unit)])
-            item.addChild(execution_unit_item)
+        #Add processing unit directory as a tooltip and sub-item
+        if processing_unit is not None:
+            item.setToolTip(0, str(processing_unit_subdir))
+            processing_unit_item = QTreeWidgetItem(["", "", "Execution dir", str(processing_unit)])
+            item.addChild(processing_unit_item)
 
         # If stdout and stderr files are present, add right click context menu to open them
         if stdout_file:
@@ -443,27 +533,28 @@ class PipelineTreeWidget(QWidget):
         slurm_info = entry.get("slurm_info", {})
         job_name = slurm_info.get("JobName", "N/A")
         job_state = slurm_info.get("State", "UNKNOWN")
-        unit_dir = entry.get("execution_unit_dir", None)
+        processing_unit_subdir = entry.get("processing_unit_subdir", None)
         stdout_file = slurm_info.get("StdOut", None)
-        stdout_basename = Path(stdout_file).name if stdout_file else None
         stderr_file = slurm_info.get("StdErr", None)
-        stderr_basename = Path(stderr_file).name if stderr_file else None
         scriptname = entry.get("script_name", None)
         script_path = self.global_working_dir / "sbatch" / scriptname if scriptname else None
         script_path = script_path.resolve() if script_path else None
         log.info(f"script_path: {script_path}, scriptname: {scriptname}, global_working_dir: {self.global_working_dir}")
         menu = QMenu(self)
         #log.info(f"Context menu for job {job_name} (ID: {entry.get('job_id', 'N/A')}) with state {job_state} stdout: {stdout_file}, stderr: {stderr_file}")
-        if stdout_file is not None and stderr_file is not None:
-            menu.addAction("Open Both StdOut and StdErr", lambda: (open_files_mousepad([stdout_file, stderr_file], on_error=lambda msg: self.status_label.setText(msg))))
-        if stdout_file is not None:
-            menu.addAction(f"StdOut: {stdout_basename}", lambda: open_files_mousepad([stdout_file], on_error=lambda msg: self.status_label.setText(msg)))
-        if stderr_file is not None:
-            menu.addAction(f"StdErr: {stderr_basename}", lambda: open_files_mousepad([stderr_file], on_error=lambda msg: self.status_label.setText(msg)))
+        # Logs open in the built-in viewer; a running job's logs are followed as they grow.
+        follow = job_state == "RUNNING"
+        logs = [(label, path) for label, path in (("StdOut", stdout_file), ("StdErr", stderr_file)) if path]
+        if len(logs) == 2:
+            menu.addAction("Open Both StdOut and StdErr", lambda: self._open_logs(entry, logs, follow))
+        for label, path in logs:
+            menu.addAction(f"{label}: {Path(path).name}", lambda l=label, p=path: self._open_logs(entry, [(l, p)], follow))
+        if logs and shutil.which("mousepad"):
+            menu.addAction("Open logs in mousepad", lambda: open_files_mousepad([p for _, p in logs], on_error=lambda msg: self.status_label.setText(msg)))
         if menu.actions():
             menu.addSeparator()
-        if unit_dir is not None:
-            menu.addAction("Open Terminal Here", lambda: open_terminal(unit_dir, on_error=lambda msg: self.status_label.setText(msg)))
+        if processing_unit_subdir is not None:
+            menu.addAction("Open Terminal Here", lambda: open_terminal(processing_unit_subdir, on_error=lambda msg: self.status_label.setText(msg)))
         if menu.actions():
             menu.addSeparator()
         if job_state in ("RUNNING", "PENDING"):
@@ -474,68 +565,78 @@ class PipelineTreeWidget(QWidget):
             menu.addAction("Resubmit Job", lambda: self._resubmit_job(entry))
         if script_path is not None and script_path.exists():
             menu.addAction("Open %s" % scriptname, lambda: open_files_vim([str(script_path)], on_error=lambda msg: self.status_label.setText(msg)))
+        menu.addSeparator()
+        menu.addAction("Show DAG entry JSON...", lambda: self._show_entry_json(entry))
         # If there are added actions, show the menu
         if menu.actions():
             menu.exec(self.tree.viewport().mapToGlobal(position))
 
+    @staticmethod
+    def _entry_label(entry: Dict[str, Any]) -> str:
+        node = entry.get("dag_node_name", entry.get("step", ""))
+        return f"{entry.get('processing_unit_name', '')} / {node} / {entry_slurm_id(entry)}"
+
+    def _open_logs(self, entry: Dict[str, Any], logs, follow: bool):
+        sources = [TextSource(title=f"{label}: {Path(path).name}", path=Path(path), header=str(path)) for label, path in logs]
+        open_text_viewer(sources, title=f"Logs {self._entry_label(entry)}", follow=follow)
+
+    def _show_entry_json(self, entry: Dict[str, Any]):
+        """Show the complete DAG entry, including the refreshed slurm_info."""
+        processing_unit_subdir = entry.get("processing_unit_subdir")
+        header = f"DAG file: {Path(processing_unit_subdir) / 'pipeline' / 'dag.json'}" if processing_unit_subdir else ""
+        # default=str keeps non-JSON values (Path, ...) inspectable.
+        text = json.dumps(entry, indent=2, ensure_ascii=False, default=str)
+        label = self._entry_label(entry)
+        open_text_viewer([TextSource(title=f"DAG entry {label}", text=text, header=header)], title=f"DAG entry {label}")
+
     def _cancel_job(self, entry: Dict[str, Any]):
-        """Cancel a SLURM job."""
-        slurm_id = entry.get("slurm_id") or entry.get("job_id")
-        if slurm_id is None:
-            log.error("Cannot cancel job: no SLURM/job ID found in entry: %r", entry)
-            self.status_label.setText("Failed to cancel job: no job ID found")
-            return
-        try:
-            subprocess.run(["scancel", str(slurm_id)], check=True, capture_output=True, text=True,)
-        except FileNotFoundError:
-            log.error("Cannot cancel job %s: 'scancel' command not found", slurm_id)
-            self.status_label.setText(f"Failed to cancel job {slurm_id}: scancel not found")
-            return
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            log.error("Failed to cancel SLURM job %s (return code %s): %s", slurm_id, exc.returncode, stderr or "no error message",)
-            self.status_label.setText(f"Failed to cancel job {slurm_id}")
-            return
-        except OSError as exc:
-            log.error("Failed to cancel SLURM job %s: %s", slurm_id, exc)
-            self.status_label.setText(f"Failed to cancel job {slurm_id}")
+        """Cancel a SLURM job and record it as CANCELLED in its pipeline entries."""
+        slurm_id = entry_slurm_id(entry) or entry.get("job_id")
+        processing_unit_subdir = entry.get("processing_unit_subdir")
+        job_id = entry.get("job_id")
+        if processing_unit_subdir and job_id is not None:
+            try:
+                results = next(iter(cancel_selected({processing_unit_subdir: [job_id]}).values()), [])
+            except Exception:
+                log.exception("Failed to cancel job %s in %s", slurm_id, processing_unit_subdir)
+                self.status_label.setText(f"Failed to cancel job {slurm_id}")
+                return
+            error = results[0]["error"] if results else "job not found in pipeline entries"
+        elif slurm_id is not None:
+            error = scancel(slurm_id)
+        else:
+            error = "no SLURM/job ID found"
+        if error:
+            log.error("Failed to cancel SLURM job %s: %s", slurm_id, error)
+            self.status_label.setText(f"Failed to cancel job {slurm_id}: {error}")
             return
         log.info("Cancelled SLURM job %s", slurm_id)
         self.status_label.setText(f"Cancelled job {slurm_id}")
         self.refresh()
-    
-    
+
     def _retire_job(self, entry: Dict[str, Any]):
-        """Mark a SLURM job as retired."""
-        slurm_id = entry.get("slurm_id") or entry.get("job_id")
+        """Mark a pipeline entry as retired."""
+        slurm_id = entry_slurm_id(entry) or entry.get("job_id")
         job_id = entry.get("job_id")
-        if job_id is None:
-            log.error("Cannot retire job: no SLURM/job ID found in entry: %r", entry)
-            self.status_label.setText("Failed to cancel job: no job ID found")
-            return
-        execution_unit_dir = entry.get("execution_unit_dir")
-        if not execution_unit_dir:
-            log.error( "Cannot retire job %s: no execution_unit_dir in entry: %r", slurm_id, entry,)
-            self.status_label.setText(f"Failed to retire job {slurm_id}: no execution directory")
+        processing_unit_subdir = entry.get("processing_unit_subdir")
+        if job_id is None or not processing_unit_subdir:
+            log.error("Cannot retire job: no job ID or processing_unit_subdir in entry: %r", entry)
+            self.status_label.setText(f"Failed to retire job {slurm_id}: incomplete pipeline entry")
             return
         try:
-            dag_entries = load_dag(execution_unit_dir)
-            update_dag_entries(dag_entries, update_retired=False, update_negative_step=False, filter_terminal_states=True,)
-            dag_entry = next((e for e in dag_entries if e.get("job_id") == job_id), None)
-            if dag_entry is None:
-                log.error("Cannot retire job %s: job not found in DAG %s", slurm_id, execution_unit_dir,)
-                self.status_label.setText(f"Failed to retire job {slurm_id}: job not found")
-                return
-            dag_entry["retired"] = True
-            save_dag(execution_unit_dir, dag_entries)
+            retired = next(iter(retire_selected({processing_unit_subdir: [job_id]}, reason="lautools-browser").values()), [])
         except Exception:
-            log.exception("Failed to retire job %s in %s", slurm_id, execution_unit_dir,)
+            log.exception("Failed to retire job %s in %s", slurm_id, processing_unit_subdir)
             self.status_label.setText(f"Failed to retire job {slurm_id}")
+            return
+        if not retired:
+            log.error("Cannot retire job %s: not found in pipeline entries of %s", slurm_id, processing_unit_subdir)
+            self.status_label.setText(f"Failed to retire job {slurm_id}: job not found")
             return
         log.info("Retired SLURM job %s", slurm_id)
         self.status_label.setText(f"Retired job {slurm_id}")
         self.refresh()
-    
+
     def _resubmit_job(self, entry: Dict[str, Any]):
         """Requeue/resubmit a SLURM job."""
         job_id = entry.get("job_id")
@@ -544,32 +645,36 @@ class PipelineTreeWidget(QWidget):
             log.error("Cannot requeue job: no SLURM/job ID found in entry: %r", entry)
             self.status_label.setText("Failed to requeue job: no job ID found")
             return
-        execution_unit_dir = entry.get("execution_unit_dir")
-        if not execution_unit_dir:
-            log.error("Cannot requeue job %s: no execution_unit_dir in entry: %r", slurm_id, entry,)
-            self.status_label.setText(f"Failed to requeue job {slurm_id}: no execution directory")
+        processing_unit_subdir = entry.get("processing_unit_subdir")
+        if not processing_unit_subdir:
+            log.error("Cannot requeue job %s: no processing_unit_subdir in entry: %r", slurm_id, entry,)
+            self.status_label.setText(f"Failed to requeue job {slurm_id}: no processing unit subdir")
             return
         try:
             env = None
             if self.environment_provider is not None:
                 env = self.environment_provider()
-            dag_entries = load_dag(execution_unit_dir)
-            update_dag_entries(dag_entries, update_retired=False, update_negative_step=False, filter_terminal_states=True,)
-            dag_entry = next((e for e in dag_entries if e.get("job_id") == job_id), None)
-            if dag_entry is None:
-                log.error("Cannot requeue job %s: job not found in DAG %s", job_id, execution_unit_dir,)
+            store = PipelineEntriesStore([processing_unit_subdir])
+            PIPELINE_ENTRIES = store[processing_unit_subdir]
+            old_entry = next((e for e in PIPELINE_ENTRIES if e.get("job_id") == job_id), None)
+            if old_entry is None:
+                log.error("Cannot requeue job %s: not found in pipeline entries of %s", job_id, processing_unit_subdir,)
                 self.status_label.setText(f"Failed to requeue job {slurm_id}: job not found")
                 return
-            new_entry = resubmit_slurm_job(dag_entries, dag_entry, env=env)
+            # One query for the node and its ancestors: the new job depends on their active jobs
+            store.refresh(limit_to_ancestors_including_node=old_entry["dag_node_name"],
+                          node_dependencies=old_entry.get("dag_node_deps", []),
+                          update_retired=False, update_negative_step=False, filter_terminal_states=True)
+            new_entry = resubmit_slurm_job(PIPELINE_ENTRIES, old_entry, env=env)
             new_slurm_id = new_entry.get("slurm_id") if new_entry else None
             if new_entry is None:
                 log.error("Failed to requeue job %s: resubmit_slurm_job returned None", slurm_id,)
                 self.status_label.setText(f"Failed to requeue job {slurm_id}")
                 return
-            dag_entries.append(new_entry)
-            save_dag(execution_unit_dir, dag_entries)
+            PIPELINE_ENTRIES.append(new_entry)
+            store.store()
         except Exception:
-            log.exception("Failed to requeue job %s in %s", slurm_id, execution_unit_dir,)
+            log.exception("Failed to requeue job %s in %s", slurm_id, processing_unit_subdir,)
             self.status_label.setText(f"Failed to requeue job {slurm_id}")
             return
         log.info("Requeued original SLURM job %s as new job %s", slurm_id, new_slurm_id)
@@ -598,14 +703,81 @@ class PipelineTreeWidget(QWidget):
         else:
             return f"State: {state}"
     
-    def _toggle_auto_refresh(self):
-        """Toggle auto-refresh timer."""
-        if self.refresh_timer.isActive():
-            self.refresh_timer.stop()
-            self.auto_refresh_btn.setText("Auto Refresh (5s)")
-        else:
-            self.refresh_timer.start(5000)  # 5 seconds
-            self.auto_refresh_btn.setText("Auto Refresh (ON)")
+    # ------------------------------------------------------------------
+    # Auto refresh
+    # ------------------------------------------------------------------
+
+    def _stored_auto_refresh(self) -> int:
+        valid = {seconds for _, seconds in AUTO_REFRESH_CHOICES}
+        if self.settings is not None:
+            try:
+                value = int(self.settings.get_app_setting(AUTO_REFRESH_SETTING, DEFAULT_AUTO_REFRESH_S))
+                if value in valid:
+                    return value
+            except Exception:
+                log.exception("Cannot read the auto refresh setting")
+        return DEFAULT_AUTO_REFRESH_S
+
+    def _on_auto_refresh_changed(self, index: int):
+        self._auto_refresh_s = self.auto_refresh_combo.itemData(index) or 0
+        if self.settings is not None:
+            try:
+                self.settings.set_app_setting(AUTO_REFRESH_SETTING, self._auto_refresh_s)
+            except Exception:
+                log.exception("Cannot store the auto refresh setting")
+        self._on_countdown_tick()
+
+    def showEvent(self, event):
+        """Tab switched to (or window shown): flash the Refresh button and refresh right away.
+
+        Every time, also when the last refresh was moments ago; a refresh
+        already running is not started twice.
+        """
+        super().showEvent(event)
+        if self.pipeline_manager is None:
+            return
+        self._show_refresh_pending = True
+        QTimer.singleShot(SHOW_REFRESH_DELAY_MS, self._refresh_on_show)
+
+    def _refresh_on_show(self):
+        self._show_refresh_pending = False
+        if not self._is_shown() or self.pipeline_manager is None:
+            return  # switched away again during the delay
+        self.refresh_btn.flash()
+        if not self._refresh_running():
+            self.refresh()
+
+    def _is_shown(self) -> bool:
+        """Visible to the user: tab current and window not minimized."""
+        return self.isVisible() and not self.window().isMinimized()
+
+    def _refresh_running(self) -> bool:
+        return self._refresh_thread is not None and self._refresh_thread.isRunning()
+
+    def _on_countdown_tick(self):
+        interval = self._auto_refresh_s
+        button = self.refresh_btn
+        if self._refresh_running():
+            button.set_countdown(None, busy=True)
+            button.setToolTip("Refreshing…")
+            return
+        if interval <= 0 or self.pipeline_manager is None:
+            button.set_countdown(None)
+            button.setToolTip("Refresh now (auto refresh off)")
+            return
+        age = time.monotonic() - self._last_refresh_end
+        if self._show_refresh_pending:
+            return  # the tab was just shown; _refresh_on_show refreshes after its short delay
+        if not self._is_shown():
+            # No SLURM queries for a hidden view; refreshed when shown again if stale.
+            button.set_countdown(min(age / interval, 1.0))
+            button.setToolTip("Refresh now (auto refresh paused while not visible)")
+            return
+        if age >= interval:
+            self.refresh()
+            return
+        button.set_countdown(age / interval)
+        button.setToolTip(f"Refresh now (next auto refresh in {interval - age:.0f} s)")
 
     def clear(self):
         """Clear the tree and reset status."""
@@ -614,6 +786,5 @@ class PipelineTreeWidget(QWidget):
         self.tree.clear()
         self.tree.addTopLevelItem(QTreeWidgetItem(["No working directory selected"]))
         self.status_label.setText("No working directory selected")
-        self.refresh_timer.stop()
-        self.auto_refresh_btn.setText("Auto Refresh (5s)")
+        self.refresh_btn.set_countdown(None)
         self._set_status_bar("idle", "Idle")

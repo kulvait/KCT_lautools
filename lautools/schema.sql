@@ -268,6 +268,14 @@ CREATE TABLE IF NOT EXISTS lautools_config (
     updated_at TEXT NOT NULL
 );
 
+-- Application preferences as key/value pairs (UI state such as the
+-- pipeline auto refresh interval). Values are stored as text.
+CREATE TABLE IF NOT EXISTS lautools_app_setting (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS laupy_project_to_recipe_instance (
     id INTEGER PRIMARY KEY,
 

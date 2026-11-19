@@ -1316,6 +1316,27 @@ class LaupyDB:
             (link_id,),
         )
 
+    def get_app_setting(self, key: str, default: str | None = None) -> str | None:
+        """Text value of an application preference, or default if unset."""
+        row = self.connection.execute(
+            "SELECT value FROM lautools_app_setting WHERE key = ?", (key,)
+        ).fetchone()
+        return default if row is None or row["value"] is None else row["value"]
+
+    def set_app_setting(self, key: str, value) -> None:
+        """Store an application preference (converted to text) and commit."""
+        with self.transaction():
+            self.connection.execute(
+                """
+                INSERT INTO lautools_app_setting (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, None if value is None else str(value), _iso(_now())),
+            )
+
     def get_config(self) -> LautoolsConfig:
         row = self.connection.execute(
             "SELECT * FROM lautools_config WHERE id = 1"
