@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import tempfile
 import uuid
+from enum import Enum
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -572,6 +573,15 @@ class CodeEditor(QPlainTextEdit):
 # Composite widget
 # ----------------------------------------------------------------------
 
+
+class PipelineScriptStatus(Enum):
+    """Status of the Pipeline tab script after BashEditorWidget.ask_user_to_save_script()."""
+    NOT_MODIFIED = "not_modified"                                       # nothing to save, no question asked
+    SAVED_BY_USER = "saved_by_user"                                     # the user chose Save and saving succeeded
+    MODIFIED_USER_WANTS_TO_DISCARD = "modified_user_wants_to_discard"   # the user chose Discard
+    CANCELLED_BY_USER = "cancelled_by_user"                             # the user chose Cancel
+    NOT_SAVED = "not_saved"                                             # Save failed or Save As was cancelled
+
 class BashEditorWidget(QWidget):
     """Editor (top) + persistent bash console (bottom)."""
 
@@ -886,23 +896,31 @@ class BashEditorWidget(QWidget):
         if info.is_file():
             self.open_file(info)
 
-    def maybe_save(self) -> bool:
-        """Return False if the user cancelled."""
+    def ask_user_to_save_script(self) -> PipelineScriptStatus:
+        """Ask whether to save unsaved changes of the Pipeline tab script before
+        it is replaced or closed. Returns the PipelineScriptStatus; the caller may
+        go on only for NOT_MODIFIED, SAVED_BY_USER and MODIFIED_USER_WANTS_TO_DISCARD.
+        """
         if not self.editor.document().isModified():
-            return True
+            return PipelineScriptStatus.NOT_MODIFIED
         answer = QMessageBox.question(
             self, "Unsaved changes",
             f"Save changes to {self._file_path or 'untitled script'}?",
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
         )
-        if answer == QMessageBox.Cancel:
-            return False
         if answer == QMessageBox.Save:
-            return self.save()
-        return True
+            return PipelineScriptStatus.SAVED_BY_USER if self.save() else PipelineScriptStatus.NOT_SAVED
+        if answer == QMessageBox.Discard:
+            # The user has decided, do not ask again for the same changes
+            self.editor.document().setModified(False)
+            return PipelineScriptStatus.MODIFIED_USER_WANTS_TO_DISCARD
+        return PipelineScriptStatus.CANCELLED_BY_USER
 
     def open_dialog(self):
-        if not self.maybe_save():
+        pipeline_script_status = self.ask_user_to_save_script()
+        if pipeline_script_status not in (PipelineScriptStatus.NOT_MODIFIED,
+                                          PipelineScriptStatus.MODIFIED_USER_WANTS_TO_DISCARD,
+                                          PipelineScriptStatus.SAVED_BY_USER):
             return
         start = str(self._file_path.parent if self._file_path else self._project_path or "")
         path, _ = QFileDialog.getOpenFileName(self, "Open script", start)
@@ -923,8 +941,14 @@ class BashEditorWidget(QWidget):
         return True
 
     def reload(self):
-        if self._file_path and self.maybe_save():
-            self.open_file(self._file_path)
+        if self._file_path is None:
+            return
+        pipeline_script_status = self.ask_user_to_save_script()
+        if pipeline_script_status not in (PipelineScriptStatus.NOT_MODIFIED,
+                                          PipelineScriptStatus.MODIFIED_USER_WANTS_TO_DISCARD,
+                                          PipelineScriptStatus.SAVED_BY_USER):
+            return
+        self.open_file(self._file_path)
 
     def save(self) -> bool:
         if self._file_path is None:

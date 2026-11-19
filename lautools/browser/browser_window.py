@@ -38,7 +38,7 @@ from laupy.pipeline_entries import entry_slurm_id
 from laupy.slurm import TRANSIENT_STATES, is_own_allocation, list_user_jobs, own_allocation_job_ids, scancel
 from lautools.browser.job_selection_dialog import JobRow, JobSelectionDialog
 from lautools.browser.text_viewer import open_text_viewer
-from lautools.browser.bash_editor_widget import BashEditorWidget
+from lautools.browser.bash_editor_widget import BashEditorWidget, PipelineScriptStatus
 from lautools.browser.project_manager import ProjectManager
 from lautools.browser.new_project_from_recipe_dialog import (NewProjectFromRecipeDialog,)
 from lautools.browser.utils import (
@@ -804,11 +804,11 @@ class BrowserWindow(QMainWindow):
         return widget
 
     def _create_pipeline_tab(self):
-        self.pipeline_editor = BashEditorWidget(parent=self)
-        self.pipeline_editor.projectPathRequested.connect(self.edit_project_path)
+        self.pipeline_tab_editor = BashEditorWidget(parent=self)
+        self.pipeline_tab_editor.projectPathRequested.connect(self.edit_project_path)
         # status_label is created later in _create_status_bar, so resolve lazily.
-        self.pipeline_editor.statusMessage.connect(lambda message: self.status_label.setText(message))
-        return self.pipeline_editor
+        self.pipeline_tab_editor.statusMessage.connect(lambda message: self.status_label.setText(message))
+        return self.pipeline_tab_editor
 
     def _create_status_tab(self):
         widget = QWidget()
@@ -833,9 +833,15 @@ class BrowserWindow(QMainWindow):
         if self.current_project is None:
             return
         info = self.current_project.path / "INFO"
-        if info.is_file() and self.pipeline_editor.maybe_save():
-            self.pipeline_editor.open_file(info)
-            self.tabs.setCurrentWidget(self.pipeline_tab)
+        if not info.is_file():
+            return
+        pipeline_script_status = self.pipeline_tab_editor.ask_user_to_save_script()
+        if pipeline_script_status not in (PipelineScriptStatus.NOT_MODIFIED,
+                                          PipelineScriptStatus.MODIFIED_USER_WANTS_TO_DISCARD,
+                                          PipelineScriptStatus.SAVED_BY_USER):
+            return
+        self.pipeline_tab_editor.open_file(info)
+        self.tabs.setCurrentWidget(self.pipeline_tab)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -899,7 +905,7 @@ class BrowserWindow(QMainWindow):
             return
 
         self.current_workspace = workspace
-        self.pipeline_editor.set_workspace(workspace.name)
+        self.pipeline_tab_editor.set_workspace(workspace.name)
 
         if persist:
             try:
@@ -1621,10 +1627,13 @@ class BrowserWindow(QMainWindow):
         self.status_label.setText(f"Updated beamtime: {label}")
 
     def closeEvent(self, event):
-        if not self.pipeline_editor.maybe_save():
+        pipeline_script_status = self.pipeline_tab_editor.ask_user_to_save_script()
+        if pipeline_script_status not in (PipelineScriptStatus.NOT_MODIFIED,
+                                          PipelineScriptStatus.MODIFIED_USER_WANTS_TO_DISCARD,
+                                          PipelineScriptStatus.SAVED_BY_USER):
             event.ignore()
             return
-        self.pipeline_editor.shutdown()
+        self.pipeline_tab_editor.shutdown()
         self.size_bridge.detach()
         self.size_service.stop()
         super().closeEvent(event)
@@ -1734,7 +1743,10 @@ class BrowserWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _activate_project(self, project):
-        if not self.pipeline_editor.maybe_save():
+        pipeline_script_status = self.pipeline_tab_editor.ask_user_to_save_script()
+        if pipeline_script_status not in (PipelineScriptStatus.NOT_MODIFIED,
+                                          PipelineScriptStatus.MODIFIED_USER_WANTS_TO_DISCARD,
+                                          PipelineScriptStatus.SAVED_BY_USER):
             return
         self.current_project = project
         self.current_workspace = None
@@ -1841,7 +1853,7 @@ class BrowserWindow(QMainWindow):
         except Exception as exc:
             log.exception("Cannot apply PATH for project %s", self.current_project.path if self.current_project else None)
             self.status_label.setText(f"PATH configuration error: {exc}")
-        self.pipeline_editor.set_project(
+        self.pipeline_tab_editor.set_project(
             self.current_project.path if self.current_project else None
         )
         if (self.current_project is not None
@@ -1873,7 +1885,10 @@ class BrowserWindow(QMainWindow):
     open_location = open_project
 
     def close_project(self):
-        if self.pipeline_editor.maybe_save():
+        pipeline_script_status = self.pipeline_tab_editor.ask_user_to_save_script()
+        if pipeline_script_status not in (PipelineScriptStatus.NOT_MODIFIED,
+                                          PipelineScriptStatus.MODIFIED_USER_WANTS_TO_DISCARD,
+                                          PipelineScriptStatus.SAVED_BY_USER):
             return
         try:
             # A null project/workspace row is intentional and represents
@@ -1892,7 +1907,7 @@ class BrowserWindow(QMainWindow):
 
         self.tabs.setCurrentIndex(0)
         self._reset_tab_texts()
-        self.pipeline_editor.set_project(None)
+        self.pipeline_tab_editor.set_project(None)
         self._update_current_project_ui()
 
     # Compatibility alias for existing signal connections.
@@ -1911,5 +1926,5 @@ class BrowserWindow(QMainWindow):
     def _apply_project_path(self):
         project_id = (self.current_project.id if self.current_project else None)
         self.path_manager.apply_to_session(
-            self.pipeline_editor.session,
+            self.pipeline_tab_editor.session,
             project_id,)
