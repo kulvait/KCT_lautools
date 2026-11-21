@@ -1950,3 +1950,6 @@ class BrowserWindow(QMainWindow):
         self.path_manager.apply_to_session(
             self.pipeline_tab_editor.session,
             project_id,)
+        # The configured directories (not the inherited PATH) are the default job PATH of submitslurm
+        self.pipeline_tab_editor.set_project_path_directories(
+            self.path_manager.effective_directories(project_id))

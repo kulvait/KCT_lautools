@@ -12,6 +12,7 @@ executions, multi-line constructs work, and stdin is redirected from
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import subprocess
 import tempfile
@@ -56,6 +57,8 @@ from PySide6.QtWidgets import (
     QStyle,
     QTextEdit,
     QToolBar,
+    QToolButton,
+    QDialog,
     QVBoxLayout,
     QWidget,
 )
@@ -72,7 +75,8 @@ from lautools.browser.bash_script_model import (
     parse_functions,
 )
 
-from lautools.browser.submitslurm_context import SubmitslurmContext, WRAPPER
+from lautools.browser.submitslurm_context import MODE_DEFAULT, MODE_FORCE, MODE_OFF, OptionSetting, SubmitslurmContext, wrapper_bash
+from lautools.browser.submitslurm_context_dialog import SubmitslurmContextDialog
 
 
 def _fmt(color=None, bold=False, italic=False, background=None):
@@ -582,6 +586,10 @@ class PipelineScriptStatus(Enum):
     CANCELLED_BY_USER = "cancelled_by_user"                             # the user chose Cancel
     NOT_SAVED = "not_saved"                                             # Save failed or Save As was cancelled
 
+# Context options shown directly in the context bar (dest, label)
+INLINE_CONTEXT_OPTIONS = (("working_dir", "-w"), ("pattern", "-p"), ("partition", "-f"))
+
+
 class BashEditorWidget(QWidget):
     """Editor (top) + persistent bash console (bottom)."""
 
@@ -603,7 +611,11 @@ class BashEditorWidget(QWidget):
         self._loaded_functions: dict[str, str] = {}   # name -> code in shell
         self._header_end = 0
         self.session.started.connect(self._on_shell_started)
-        self.ss_context = SubmitslurmContext(values={"-w": "wd"}, forced=set())
+        self.ss_context = SubmitslurmContext(options={"working_dir": OptionSetting(MODE_DEFAULT, "wd")})
+        # The context for the shell's submitslurm function (see submitslurm_merge.py)
+        self._ss_context_dir = tempfile.TemporaryDirectory(prefix="lautools_ss_")
+        self._ss_context_file = Path(self._ss_context_dir.name) / "submitslurm_context.json"
+        self.ss_context.write_json(self._ss_context_file)
         self._create_ui()
         self._update_title()
 
@@ -665,20 +677,32 @@ class BashEditorWidget(QWidget):
         self.ctx_enabled.setChecked(self.ss_context.enabled)
         ctx_row.addWidget(self.ctx_enabled)
         self.ctx_edits, self.ctx_force = {}, {}
-        for key, label in (("-w", "-w"), ("-p", "-p"), ("-f", "-f")):
+        self._ctx_syncing = False
+        # Shortcuts for the most used options; the same settings as in the context editor
+        for dest, label in INLINE_CONTEXT_OPTIONS:
             ctx_row.addWidget(QLabel(label))
-            edit = QLineEdit(self.ss_context.values.get(key, ""))
+            edit = QLineEdit()
             edit.setMaximumWidth(110)
             edit.setPlaceholderText("(none)")
-            self.ctx_edits[key] = edit
+            self.ctx_edits[dest] = edit
             ctx_row.addWidget(edit)
             force = QCheckBox("force")
             force.setToolTip("Override the option even if the call sets it")
-            self.ctx_force[key] = force
+            self.ctx_force[dest] = force
             ctx_row.addWidget(force)
             edit.editingFinished.connect(self._ctx_changed)
             force.toggled.connect(self._ctx_changed)
         self.ctx_enabled.toggled.connect(self._ctx_changed)
+        # All other options, free text and the job environment: edited in a dialog, summarized here
+        ctx_button = QToolButton()
+        ctx_button.setText("Context…")
+        ctx_button.setToolTip("Edit all submitslurm options added to every call, and the job environment (PATH, variables)")
+        ctx_button.clicked.connect(self._edit_context)
+        ctx_row.addSpacing(8)
+        ctx_row.addWidget(ctx_button)
+        self.ctx_summary = QLabel()
+        self.ctx_summary.setStyleSheet("color: #808080;")
+        ctx_row.addWidget(self.ctx_summary)
         ctx_row.addStretch()
 
         self.editor = CodeEditor(self)
@@ -741,18 +765,65 @@ class BashEditorWidget(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter)
+        self._update_context_label()
 
     def _ctx_changed(self, *_):
+        if self._ctx_syncing:
+            return
         self.ss_context.enabled = self.ctx_enabled.isChecked()
-        self.ss_context.values = {k: e.text() for k, e in self.ctx_edits.items()}
-        self.ss_context.forced = {k for k, c in self.ctx_force.items() if c.isChecked()}
+        for dest, edit in self.ctx_edits.items():
+            text = edit.text().strip()
+            mode = (MODE_FORCE if self.ctx_force[dest].isChecked() else MODE_DEFAULT) if text else MODE_OFF
+            if text or dest in self.ss_context.options:
+                self.ss_context.options[dest] = OptionSetting(mode, text)
+        self.apply_context()
+
+    def _job_shell_environment(self) -> dict[str, str]:
+        """The environment submitslurm sees in the console shell, as the shell is started
+        (changes made inside the shell, e.g. by sourcing scripts, are not known here)."""
+        env = dict(os.environ)
+        env.pop("LAUPY_PYTHON", None)
+        if self.session._path_value:
+            env["PATH"] = self.session._path_value
+        return env
+
+    def _edit_context(self):
+        dialog = SubmitslurmContextDialog(self.ss_context, self._project_path, self._job_shell_environment(), parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            self.ss_context = dialog.context()
+            self.apply_context()
+
+    def set_project_path_directories(self, directories: list[str]):
+        """Directories of the project PATH settings (default job PATH of the context)."""
+        self.ss_context.project_path_dirs = list(directories)
         self.apply_context()
 
     def _update_context_label(self):
-        # keep the edit in sync when set_workspace() changed -w programmatically
-        edit = self.ctx_edits.get("-w")
-        if edit is not None and edit.text() != self.ss_context.values.get("-w", ""):
-            edit.setText(self.ss_context.values.get("-w", ""))
+        """Show the context in the bar (inline options, summary of the rest)."""
+        if not hasattr(self, "ctx_summary"):
+            return
+        self._ctx_syncing = True
+        try:
+            self.ctx_enabled.setChecked(self.ss_context.enabled)
+            for dest, edit in self.ctx_edits.items():
+                setting = self.ss_context.setting(dest)
+                text = "" if setting.mode == MODE_OFF or setting.value is None else str(setting.value)
+                if edit.text() != text:
+                    edit.setText(text)
+                self.ctx_force[dest].setChecked(setting.mode == MODE_FORCE)
+        finally:
+            self._ctx_syncing = False
+        summary = self.ss_context.summary()
+        self.ctx_summary.setText(summary if self.ss_context.enabled else f"({summary}; disabled)")
+        try:
+            defaults, forced, extra = self.ss_context.arguments()
+            added = [" ".join(tokens) + (" (forced)" if dest in forced else "") for dest, tokens in defaults.items()]
+            if extra:
+                added.append(" ".join(extra))
+            tooltip = "Added to every submitslurm call:\n" + ("\n".join(added) or "(nothing)")
+        except ValueError as e:
+            tooltip = f"Free text invalid: {e}"
+        self.ctx_summary.setToolTip(tooltip)
 
     def _configure_toolbar(self, toolbar):
         toolbar.setIconSize(QSize(16, 16))
@@ -863,22 +934,23 @@ class BashEditorWidget(QWidget):
     # -- project / file handling ---------------------------------------
     def _on_shell_started(self):
         self._loaded_functions.clear()
-        # Order matters: wrapper and context first, then user functions.
-        self.session.execute(WRAPPER + self.ss_context.to_bash(), silent=True)
+        # Order matters: wrapper first, then user functions.
+        self.session.execute(wrapper_bash(self._ss_context_file), silent=True)
         self.sync_functions()
 
     def apply_context(self):
-        """Push the current context into the running shell (no echo)."""
-        if self.session.is_running():
-            self.session.execute(self.ss_context.to_bash(), silent=True)
+        """Write the current context for the shell's submitslurm function; it is read at every call."""
+        self.ss_context.write_json(self._ss_context_file)
         self._update_context_label()
 
     def set_workspace(self, name: str | None):
         """Called by the main window when a wd* directory is selected."""
+        setting = self.ss_context.setting("working_dir")
         if name:
-            self.ss_context.values["-w"] = name
+            mode = MODE_FORCE if setting.mode == MODE_FORCE else MODE_DEFAULT
+            self.ss_context.options["working_dir"] = OptionSetting(mode, name)
         else:
-            self.ss_context.values.pop("-w", None)
+            self.ss_context.options.pop("working_dir", None)
         self.apply_context()
 
     def set_project(self, project_path: Path | None):
