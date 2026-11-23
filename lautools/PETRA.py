@@ -18,7 +18,6 @@ import json
 import os
 import pandas as pd
 import numpy as np
-import sys
 from scipy.signal import find_peaks
 
 import logging
@@ -149,21 +148,109 @@ def findInsertionEvents(
 
 
 
-def normalize_timestamps_preserve_increase(old_ts):
-	"""
-	Normalize timestamps so that:
-		new[i] = new[i-1] + max(1, old[i] - old[i-1])
-	preserving original positive increases and fixing zero/negative increases.
+TIMESTAMP_FLAT_BLOCKS = ("Timestamp issue: found known structure of wrongly positioned flat field blocks within "
+						 "acquisition")
+TIMESTAMP_REPEATED = "Timestamp issue: found repeated value with %d items offset from original"
+TIMESTAMP_UNKNOWN = "Timestamp issue: unknown issue encountered proceeding with default correction"
+
+
+def fix_timestamps(old_ts, keys=None, fixKnownTimestampIssues=True):
+	"""(strictly increasing timestamps, issues) for frames logged with timestamps that repeat or drop
+	back; the frames keep their order. issues: [(kind, (first row, last row), detail)] with kind
+	"flat_blocks", "repeated" or "unknown"; timestamp_issue_messages() makes the log lines.
+
+	Default correction: from a zero or negative step on, the frames are moved 1 ms behind the frame
+	before them keeping their steps, until an original time fits again (is later than the corrected
+	time before it); so only frames with a wrong time are re-timed. Each such run is classified:
+	- flat_blocks (known structure, needs keys = image_key): the run is exactly a flat field block
+	  (key 1) whose first time is the first time of the block before it (seen in P05/P07 files: the
+	  flats after the darks and the flats after the projections); fixed by centring it between the
+	  frames before and after it, or at the end of the scan by putting it after the frame before it
+	  with the pause of the transition into that frame's block (moving the object out as long as in);
+	- repeated (known): a single frame with exactly the time of the frame n rows before it, the frames
+	  around it on time (seen with n = 20); fixed by putting it halfway between its neighbours;
+	- unknown: the default correction.
+	With fixKnownTimestampIssues=False the known issues are reported but get the default correction.
 	"""
 	old_ts = np.asarray(old_ts, dtype=np.int64)
-	if len(old_ts) == 0:
-		return old_ts
+	keys = None if keys is None else np.asarray(keys)
 	new_ts = old_ts.copy()
+	offset = 0
 	for i in range(1, len(old_ts)):
-		original_increase = old_ts[i] - old_ts[i - 1]
-		required_increase = max(1, original_increase)
-		new_ts[i] = new_ts[i - 1] + required_increase
-	return new_ts
+		if old_ts[i] > new_ts[i - 1]:
+			offset = 0   # the original time fits again
+		elif old_ts[i] + offset <= new_ts[i - 1]:
+			offset = new_ts[i - 1] + 1 - old_ts[i]   # a repeat or a drop
+		new_ts[i] = old_ts[i] + offset
+	changed = np.nonzero(new_ts != old_ts)[0]
+	issues = []
+	if len(changed) == 0:
+		return new_ts, issues
+
+	def block_start(row):
+		while row > 0 and keys[row - 1] == keys[row]:
+			row -= 1
+		return row
+
+	for run in np.split(changed, np.nonzero(np.diff(changed) != 1)[0] + 1):
+		first, last = int(run[0]), int(run[-1])
+		at_end = last + 1 == len(old_ts)
+		before = new_ts[first - 1]
+		kind = "unknown"
+		if keys is not None and keys[first] == 1 and keys[first] != keys[first - 1] and \
+				(at_end or keys[last + 1] != keys[last]) and (keys[first:last + 1] == 1).all():
+			previous = block_start(first - 1)
+			if abs(int(old_ts[first]) - int(old_ts[previous])) <= 1:
+				kind = "flat_blocks"
+		elif len(run) == 1 and not at_end and old_ts[first + 1] > before:
+			copies = [n for n in range(1, first + 1) if old_ts[first - n] == old_ts[first]]
+			if copies:
+				kind, distance = "repeated", copies[0]
+		if kind != "unknown" and fixKnownTimestampIssues:
+			if kind == "repeated":
+				new_ts[first] = before + (new_ts[first + 1] - before) // 2
+			elif not at_end:
+				span = new_ts[last] - new_ts[first]
+				free = new_ts[last + 1] - before
+				if free - span >= 2:
+					new_ts[run] += before + (free - span) // 2 - new_ts[first]
+			else:
+				steps = np.diff(new_ts[run])
+				gap = int(np.median(steps)) if len(steps) else 1
+				previous = block_start(first - 1)
+				if previous > 0 and new_ts[previous] - new_ts[previous - 1] > gap:
+					gap = int(new_ts[previous] - new_ts[previous - 1])
+				new_ts[run] += before + gap - new_ts[first]
+		rows = "row %d" % first if first == last else "rows %d-%d" % (first, last)
+		detail = "%s %+d ms" % (rows, int(new_ts[first] - old_ts[first]))
+		if kind == "repeated":
+			kind = "repeated %d" % distance
+			detail += " (time of row %d)" % (first - distance)
+		issues.append((kind, (first, last), detail))
+	return new_ts, issues
+
+
+def timestamp_issue_messages(issues, fixKnownTimestampIssues=True):
+	"""One line per kind of issue of fix_timestamps, with its rows."""
+	lines = []
+	for kind in dict.fromkeys(k for k, _, _ in issues):
+		details = ", ".join(d for k, _, d in issues if k == kind)
+		if kind == "flat_blocks":
+			text = TIMESTAMP_FLAT_BLOCKS
+		elif kind.startswith("repeated"):
+			text = TIMESTAMP_REPEATED % int(kind.split()[1])
+		else:
+			text = TIMESTAMP_UNKNOWN
+		text += ": " + details
+		if kind != "unknown":
+			text += "; fixed" if fixKnownTimestampIssues else "; default correction (fixKnownTimestampIssues=False)"
+		lines.append(text)
+	return lines
+
+
+def normalize_timestamps_preserve_increase(old_ts, keys=None, fixKnownTimestampIssues=True):
+	"""Strictly increasing timestamps, the frames in their order: see fix_timestamps."""
+	return fix_timestamps(old_ts, keys, fixKnownTimestampIssues)[0]
 
 
 
@@ -679,7 +766,7 @@ class ScanDescription:
 			df["time"] = pd.to_datetime(df.index, unit="ms")
 		return df
 
-	def scanDataset(self, includeCurrent=False, timeOffsetSec=None):
+	def scanDataset(self, includeCurrent=False, timeOffsetSec=None, fixKnownTimestampIssues=True):
 		"""DataFrame of the frames of a scan: time, image_key, image_file and the logs of entry/scan/data.
 
 		With includeCurrent, the column current holds the beam current interpolated at the frame times
@@ -706,8 +793,10 @@ class ScanDescription:
 				log.warning(f"Label '{lab}' not inserted into DataFrame from file {self.name}: {ve}")
 		time_values = df["time"].values.astype(np.int64)
 		if not all(np.diff(time_values) > 0):
-			log.warning("Non-increasing timestamps detected in file %s; normalizing timestamps." % self.name)
-			df["time"] = normalize_timestamps_preserve_increase(df["time"].values)
+			normalized, issues = fix_timestamps(time_values, df["image_key"].to_numpy(), fixKnownTimestampIssues)
+			for text in timestamp_issue_messages(issues, fixKnownTimestampIssues):
+				log.warning("%s (%s)" % (text, self.name))
+			df["time"] = normalized
 		df.index = df["time"].values
 		df["time"] = pd.to_datetime(df["time"].astype(np.int64), unit="ms")
 		if includeCurrent:
@@ -723,9 +812,10 @@ class ScanDescription:
 		df = df.sort_values("time", ascending=True)
 		return df
 
-	def imageDataset(self, image_key=0, includeCurrent=True, includePixelShift=False, overrideMagnification=None):
+	def imageDataset(self, image_key=0, includeCurrent=True, includePixelShift=False, overrideMagnification=None,
+					 fixKnownTimestampIssues=True):
 		"""The frames of one image_key with frame_ind and optionally pixel_shift (from s_stage_x)."""
-		df = self.scanDataset(includeCurrent)
+		df = self.scanDataset(includeCurrent, fixKnownTimestampIssues=fixKnownTimestampIssues)
 		df = df.loc[df["image_key"] == image_key]
 		df = df.assign(frame_ind=np.arange(len(df)))
 		if includePixelShift:
@@ -952,13 +1042,15 @@ def beamCurrentDataset(h5file, timeOffsetSec=None):
 	return ScanDescriptionFactory.create(h5file).beamCurrentDataset(timeOffsetSec)
 
 
-def scanDataset(h5file, includeCurrent=False, timeOffsetSec=None):
+def scanDataset(h5file, includeCurrent=False, timeOffsetSec=None, fixKnownTimestampIssues=True):
 	"""DataFrame of the frames of a scan, see ScanDescription.scanDataset."""
-	return ScanDescriptionFactory.create(h5file).scanDataset(includeCurrent, timeOffsetSec)
+	return ScanDescriptionFactory.create(h5file).scanDataset(includeCurrent, timeOffsetSec, fixKnownTimestampIssues)
 
 
-def imageDataset(h5file, image_key=0, includeCurrent=True, includePixelShift=False, overrideMagnification=None):
-	return ScanDescriptionFactory.create(h5file).imageDataset(image_key, includeCurrent, includePixelShift, overrideMagnification)
+def imageDataset(h5file, image_key=0, includeCurrent=True, includePixelShift=False, overrideMagnification=None,
+				 fixKnownTimestampIssues=True):
+	return ScanDescriptionFactory.create(h5file).imageDataset(image_key, includeCurrent, includePixelShift, overrideMagnification,
+															  fixKnownTimestampIssues)
 
 
 def scanDatasetNanotomography(logfile, folder, includeCurrent=False):
@@ -1106,11 +1198,9 @@ def scanDatasetNanotomography(logfile, folder, includeCurrent=False):
 	# Follow scanDataset's convention for duplicate/non-increasing times.
 	# time_sec retains the original relative timestamps.
 	if np.any(np.diff(timestamps) <= 0):
-		log.warning(
-			"Non-increasing timestamps in %s; normalizing timestamps.",
-			logfile,
-		)
-		timestamps = normalize_timestamps_preserve_increase(timestamps)
+		timestamps, issues = fix_timestamps(timestamps)
+		for text in timestamp_issue_messages(issues):
+			log.warning("%s (%s)", text, logfile)
 
 	df.index = timestamps
 	df["time"] = pd.to_datetime(timestamps, unit="ms")
