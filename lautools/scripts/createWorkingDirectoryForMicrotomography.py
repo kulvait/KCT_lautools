@@ -38,7 +38,7 @@ import logging
 from pprint import pprint
 from pathlib import Path
 from denpy import DICOM
-from denpy import PETRA
+from lautools import PETRA
 from denpy import UTILS
 
 # Create a logger specific to this module

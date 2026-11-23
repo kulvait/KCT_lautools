@@ -31,7 +31,7 @@ Created: 05/2026
 
 import argparse
 from lautools import NANOCT
-from denpy import PETRA
+from lautools import PETRA
 from denpy import DEN
 import numpy as np
 

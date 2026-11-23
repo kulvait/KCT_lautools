@@ -48,7 +48,8 @@ log.propagate = False
 
 import numpy as np
 import pandas as pd
-from denpy import DEN, PETRA, UTILS
+from denpy import DEN, UTILS
+from lautools import PETRA
 from scipy.ndimage import convolve1d
 from scipy.optimize import curve_fit
 from skimage.restoration import denoise_tv_chambolle

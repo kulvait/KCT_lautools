@@ -1,0 +1,470 @@
+% lautools API manual: scan metadata, conversion of scans and the lautools command line tools.
+% lautools-browser and the laupy tools are described in laupy_lautools_manual (maintained in laupy).
+% Compile with:  tectonic lautools_api_manual.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{listings}
+\usepackage{booktabs,tabularx,longtable,array}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{accent}{HTML}{1F5A96}
+\definecolor{termbg}{HTML}{F4F6F8}
+\definecolor{termframe}{HTML}{B8C2CC}
+\definecolor{notebg}{HTML}{EAF2FB}
+\definecolor{warnbg}{HTML}{FDF1E4}
+\definecolor{warnframe}{HTML}{D9822B}
+
+\hypersetup{colorlinks=true,linkcolor=accent,urlcolor=accent}
+\setlist{itemsep=2pt,topsep=4pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\setlength{\emergencystretch}{3em}
+
+\titleformat{\section}{\Large\bfseries\sffamily\color{accent}}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\large\bfseries\sffamily}{\thesubsection}{0.8em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\sffamily}{\thesubsubsection}{0.8em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\sffamily lautools --- API and command line tools}
+\fancyhead[R]{\small\sffamily\nouppercase{\leftmark}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  breakatwhitespace=false,
+  postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  tabsize=4,
+  upquote=true,
+  language={},
+}
+
+\tcbset{terminalstyle/.style={listing only, colback=termbg, colframe=termframe, boxrule=0.4pt,
+  arc=2pt, left=4pt, right=4pt, top=2pt, bottom=2pt, breakable}}
+\newtcblisting{terminal}{terminalstyle}
+\newtcblisting{terminalsmall}{terminalstyle, listing options={basicstyle=\ttfamily\footnotesize}}
+\newtcolorbox{note}{colback=notebg, colframe=accent, boxrule=0.4pt, arc=2pt, left=6pt, right=6pt, breakable}
+\newtcolorbox{warning}{colback=warnbg, colframe=warnframe, boxrule=0.4pt, arc=2pt, left=6pt, right=6pt, breakable}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+
+\begin{document}
+\sloppy
+
+\begin{titlepage}
+\centering
+\vspace*{4cm}
+{\Huge\bfseries\sffamily\color{accent} lautools\par}
+\vspace{0.6cm}
+{\Large\sffamily Python API and command line tools\par}
+\vspace{0.4cm}
+{\large\sffamily scan metadata, conversion of scans, processing tools\par}
+\vspace{1.2cm}
+{\large Manual\par}
+\vfill
+{\small Vojtěch Kulvait, Helmholtz-Zentrum Hereon\par}
+{\small November 2026\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ====================================================================
+\section{Overview}
+
+lautools is the tomography package of the laupy ecosystem. It has three parts:
+\begin{itemize}
+\item \textbf{lautools-browser}, the graphical front end of projects, recipes and pipelines; it is
+  described with the laupy command line tools in the \emph{laupy \& lautools-browser user manual}
+  (\code{laupy_lautools_manual.pdf}).
+\item \textbf{the Python API} of scans: metadata of PETRA III scans, the conversion of scans to zarr
+  and DEN, processing helpers --- this manual.
+\item \textbf{command line tools} built on the API, used by the pipelines of the recipes --- this
+  manual, \S\ref{sec:tools}.
+\end{itemize}
+
+\begin{longtable}{@{}p{3.1cm}p{11.7cm}@{}}
+\toprule
+\textbf{Module} & \textbf{Content}\\
+\midrule
+\endhead
+\code{PETRA} & Scan metadata of PETRA III (P05, P07): HDF5 files and zarr stores parsed into one canonical \code{ScanDescription}; analyses (frames, current, experiment info); writers to zarr and HDF5 (\S\ref{sec:petra}).\\
+\code{TOMOGRAPHY} & Functions on scan datasets independent of the instrument: the TIFF stack specification of a scan (\S\ref{sec:tomography}).\\
+\code{NANOCT} & Scan datasets of P05 nanotomography from \code{LogScan.log} and the TIFF files (\S\ref{sec:nanoct}).\\
+\code{COR} & Rotation centre estimation with a JSON cache.\\
+\code{preprocess} & Frame preprocessing: hot pixels (median or zinger filter), large components.\\
+\code{scripts} & The command line tools (\S\ref{sec:tools}).\\
+\bottomrule
+\end{longtable}
+
+lautools uses denpy for the data formats: DEN files, zarr codecs, the parallel zip store
+\code{ZARZS} and the TIFF stack conversion \code{denpy.TIFF}; see the \emph{denpy manual}. The division
+of labour: denpy knows formats and has no measurement specific code; lautools knows scans and
+instruments and builds the conversion specifications that denpy executes.
+
+% ====================================================================
+\section{Scan metadata: PETRA}\label{sec:petra}
+
+\subsection{One canonical scan description}
+
+The metadata of a PETRA III scan exist in several forms: NeXus HDF5 files written by the beamline
+software in different years and beamlines, and the \code{params} group of zarr stores written by the
+conversion tools. The layouts differ in details that carry no meaning:
+
+\begin{longtable}{@{}p{3.2cm}p{11.6cm}@{}}
+\toprule
+\textbf{Layout} & \textbf{Typical form}\\
+\midrule
+\endhead
+P05 2021 & Attributes as one-element object arrays, single strings as (1,) datasets, datasets in chunks of 1024.\\
+P05 2025 & \code{NX_class} as plain string, scalar string datasets, empty (0,) logs, chunks of one element, unlimited first dimension.\\
+P07 & (1,) strings, each dataset one chunk of its full length.\\
+zarr \code{params} & Scalar datasets as group attributes, N-D datasets as arrays, plus the scan table.\\
+\bottomrule
+\end{longtable}
+
+\code{lautools.PETRA} parses every form into one canonical \code{ScanDescription} and implements every
+analysis once, on it. The canonical form follows the zarr data model: a tree of \code{ScanGroup}s,
+each with
+\begin{itemize}
+\item \textbf{attributes}: JSON values: the HDF5 attributes and the scalar datasets; numpy values as
+  Python values, bytes as \code{str}, one-element sequences as their element; an attribute wins
+  over a scalar dataset of the same name;
+\item \textbf{arrays}: numpy arrays with their dtype; strings as object arrays of \code{str};
+\item \textbf{groups}.
+\end{itemize}
+A string array of one element is a string attribute (an artefact of the writing software, e.g.\
+\code{entry/beamline/name} of 2021 files), except in logs --- \code{NXlog} groups or groups with
+\code{time} and \code{value} --- whose arrays stay arrays whatever their length. A (1,) number stays an
+array; \code{value()} gives its element.
+
+\subsection{Reading: ScanDescriptionFactory}
+
+\begin{terminal}
+from lautools import PETRA
+d = PETRA.ScanDescriptionFactory.fromH5("scan.h5")            # file name, h5py File or Group
+d = PETRA.ScanDescriptionFactory.fromZarr("scan.zar")         # store name or zarr.Group; group params
+d = PETRA.ScanDescriptionFactory.create(source)               # any of these, or a ScanDescription
+\end{terminal}
+
+\code{fromZarr} leaves out the scan table (attributes \code{columns}, \code{index}, \code{data} of
+\code{params}) and takes the path of the HDF5 file of the scan from the root attributes (\code{h5}).
+
+\begin{note}
+\textbf{Lazy reading.} P05 files have about 150 groups and store their arrays in chunks of one
+element, which are slow to read. From an HDF5 file, groups and arrays are read when first used, the
+members of a group at a time; \code{getExperimentInfo} reads a handful of groups. The file has to stay
+in place until the description is used; \code{d.load()} reads everything.
+\end{note}
+
+\subsection{ScanGroup}
+
+\begin{longtable}{@{}p{4.4cm}p{10.4cm}@{}}
+\toprule
+\textbf{Member} & \textbf{Meaning}\\
+\midrule
+\endhead
+\code{attrs}, \code{arrays}, \code{groups} & The members (dicts).\\
+\code{value(path)} & The scalar at \code{path}, wherever it is stored: an attribute, or the element of a one-element array; \code{None} for an empty array; a longer array as it is.\\
+\code{data(path)} & The values as a 1-D numpy array (an array raveled, an attribute as one element).\\
+\code{array(path)}, \code{group(path)} & The array or group, or \code{None}.\\
+\code{path in g}, \code{g[path]} & Groups, arrays and attributes.\\
+\code{scalars()} & The values of the arrays and attributes of the group except \code{NX_class}.\\
+\code{differences(other)} & List of differences (attributes, arrays with dtype and values, groups); \code{==}.\\
+\bottomrule
+\end{longtable}
+
+Paths are relative to \code{/entry} (HDF5) or \code{params} (zarr): \code{d.root.value("beamline/name")}.
+
+\subsection{ScanDescription}
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{6.2cm}p{8.6cm}@{}}
+\toprule
+\textbf{Method} & \textbf{Result}\\
+\midrule
+\endhead
+\code{scanDataset(includeCurrent,} \code{timeOffsetSec)} & DataFrame of the frames in acquisition order: \code{time}, \code{image_key} (0 projection, 1 flat, 2 dark), \code{image_file} and the logs of \code{scan/data} (\code{s_rot}, \code{s_stage_x}, \dots); with \code{includeCurrent} the beam current interpolated at the frame times. Index: UNIX time in ms.\\
+\code{imageDataset(image_key,} \code{includeCurrent,} \code{includePixelShift)} & The frames of one key with \code{frame_ind}, optionally \code{pixel_shift} from \code{s_stage_x}.\\
+\code{getExperimentInfo(} \code{overrideMagnification)} & Experiment, beamline, times, frame rates, setup (distance, energy), camera (pixel size, field of view), Fresnel number.\\
+\code{beamCurrentDataset(} \code{timeOffsetSec)} & Beam current readings; \code{BeamCurrentError} if there are none.\\
+\code{findInsertionEvents(...)} & Top-up injections in the current.\\
+\code{getBasicDatasetInfo()} & The frame table as logged (ms times).\\
+\code{rootAttributes(export=None)} & JSON root attributes of a zarr store of the scan: experiment info and \code{export}.\\
+\code{writeZarrGroup(group,} \code{name="params",} \code{scanTable=True)} & Write the description (and the scan table) as a zarr group.\\
+\code{writeH5(path, chunk=1)} & Write \code{/entry} of an HDF5 file in the 2025 P05 layout.\\
+\code{load()}, \code{differences(other)}, \code{==} & Read everything; compare.\\
+\bottomrule
+\end{longtable}
+
+\subsection{Module functions and migration from denpy}
+
+The module functions of \code{denpy.PETRA} exist with the same signatures and results:
+\code{scanDataset}, \code{imageDataset}, \code{getExperimentInfo}, \code{beamCurrentDataset},
+\code{findInsertionEvents}, \code{getBasicDatasetInfo}, \code{BeamCurrentError},
+\code{scanDatasetNanotomography}. They take an HDF5 file (name or h5py object), a zarr store with a
+\code{params} group, or a \code{ScanDescription}. Migration is the import:
+
+\begin{terminal}
+from lautools import PETRA        # was: from denpy import PETRA
+df = PETRA.scanDataset("scan.h5", includeCurrent=True)
+df = PETRA.scanDataset("raw.zar", includeCurrent=True)       # the same from the converted store
+\end{terminal}
+
+\code{denpy.PETRA} stays as the legacy implementation; the lautools tests compare both on synthetic
+scans and on real beamline files.
+
+\subsection{Writing: zarr and HDF5}
+
+\begin{terminal}
+d = PETRA.ScanDescriptionFactory.fromH5("scan.h5")
+root = zarr.open_group(store, mode="a")
+d.writeZarrGroup(root)                        # group params; scanTable=df for a given table
+d.writeH5("reconstructed.h5")                 # /entry in the 2025 layout
+\end{terminal}
+
+\code{writeH5} writes \code{NX_class} as plain string attributes, the other attributes as scalar
+datasets (strings as variable-length ASCII, UTF-8 if needed), arrays with unlimited first dimension in
+chunks of one element and no compression, as the beamline does. A 2025 file is reproduced exactly; an
+older file becomes the same description in the 2025 layout. The syscripts tool
+\code{zarrToBeamtimeH5.py} is \code{fromZarr(...).writeH5(...)}.
+
+\subsection{Ground truth and tests}
+
+\code{lautools/test_PETRA.py} checks: the border cases of the files (missing or empty current, empty
+or scalar camera values, incomplete logs); that both P05 layouts give the same description; zarr round
+trips (directory and zip store) and that every analysis gives the same result from zarr as from HDF5;
+that \code{writeH5} reproduces the 2025 layout; and that every analysis gives the results of
+\code{denpy.PETRA}. With real files:
+
+\begin{terminal}
+LAUTOOLS_PETRA_TEST_FILES=/path/to/h5_examples python -m pytest lautools/test_PETRA.py
+\end{terminal}
+
+% ====================================================================
+\section{Scan datasets to conversion specifications: TOMOGRAPHY}\label{sec:tomography}
+
+A \emph{scan dataset} is the DataFrame of the frames of a scan, as \code{PETRA.scanDataset} and
+\code{NANOCT.scanDataset} create it: columns \code{image_key} and \code{image_file} (and
+\code{file_exists} for nanoCT), rows in acquisition order.
+\code{TOMOGRAPHY.scanTiffStackConversionSpecs} turns it into a TIFF stack specification of denpy
+(see the denpy manual): one tiff stack and one array per image key.
+
+\begin{terminal}
+spec = TOMOGRAPHY.scanTiffStackConversionSpecs(df, output, rawDir=None, names=None,
+          fillValue=None, frameShape=None, dtype=None, defaults=None, attributes=None)
+\end{terminal}
+
+\begin{longtable}{@{}p{2.6cm}p{12.2cm}@{}}
+\toprule
+\textbf{Argument} & \textbf{Meaning}\\
+\midrule
+\endhead
+\code{output} & The output of the specification, e.g.\ \code{{"format": "zarr", "store": "zip", "path": "raw.zar"}}.\\
+\code{rawDir} & \code{image_file} is relative to it (a leading \code{/} is ignored, as in P05 files); \code{None}: paths as they are (nanoCT: absolute).\\
+\code{names} & Image key $\to$ name; default \code{SCAN_ARRAY_NAMES} \code{{2: "dar", 1: "ref", 0: "img"}}, the names the pipelines read. A key without rows gives a stack of 0 frames.\\
+\code{fillValue} & \code{None}: a row without a file (empty name, \code{file_exists} false, not on disk) is an error; a number: such rows become \code{null} frames written as this value and listed in the report.\\
+\code{frameShape}, \code{dtype} & Of the frames; default from the first existing file.\\
+\code{defaults}, \code{attributes} & Array defaults (e.g.\ the codec) and root attributes.\\
+\bottomrule
+\end{longtable}
+
+The result is an ordinary specification: extend it (\code{denpy.TIFF.extend_spec}), save it, run it
+with \code{denpy.TIFF.execute} or \code{convertTiffStack}.
+
+\begin{terminal}
+from lautools import PETRA, TOMOGRAPHY
+from denpy import TIFF
+scanDescription = PETRA.ScanDescriptionFactory.fromH5("scan.h5")
+df = scanDescription.scanDataset()
+spec = TOMOGRAPHY.scanTiffStackConversionSpecs(df, {"format": "den", "path": "origin"}, rawDir="raw")
+spec = TIFF.extend_spec(spec, "dark_correction.json")
+report = TIFF.execute(TIFF.validate(spec))
+\end{terminal}
+
+% ====================================================================
+\section{Nanotomography: NANOCT}\label{sec:nanoct}
+
+\code{NANOCT.scanDataset(LogScan, imgDir=None, one_based=True, drop_missing=True,
+check_block_order=True)} builds the scan dataset of a P05 nanoCT measurement from \code{LogScan.log}
+and the raw TIFF files (\code{img_*}, \code{ref_*}, \code{dar_*}): log rows and files are matched by
+blocks and counters; columns \code{time}, \code{image_key}, \code{image_file}, \code{file_exists},
+\code{s_rot}, \code{current}, \code{log_counter}, \code{log_block}.
+\code{scanDatasetWithForeignDarkFields} appends the flat fields of another measurement as dark
+fields.
+
+% ====================================================================
+\section{Command line tools}\label{sec:tools}
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash\footnotesize}p{7.4cm}>{\raggedright\arraybackslash}p{7.4cm}@{}}
+\toprule
+\textbf{Command} & \textbf{Purpose}\\
+\midrule
+\endhead
+\code{tiffScanDataToZarrForMicrotomography} & Zarr store or DEN files of a PETRA III microtomography scan; replaces \code{rawTiffStructureToZarr.py} and \code{rawTiffStructureToDen.py} (\S\ref{sec:micro}).\\
+\code{tiffScanDataToZarrForNanotomography} & Zarr store of a nanoCT scan (\code{LogScan.log}).\\
+\code{tiffScanInfoForMicrotomography}, \code{tiffScanInfoForNanotomography} & Per-frame statistics of the raw frames with the metadata.\\
+\code{createWorkingDirectoryForMicrotomography}, \code{createWorkingDirectoryForNanotomography} & Working directories with the selected samples.\\
+\code{createTickFile} & DEN file of angle, shift and current of the frames.\\
+\code{currentCorrect} & Beam current correction after dark field correction.\\
+\code{selectAngleSequenceForFBP} & Contiguous angular range for 180\textdegree{} filtered back projection.\\
+\code{removeHotPixels} & Hot pixels and zingers of a DEN or zarr stack.\\
+\code{binDenFile} & Binning of DEN files.\\
+\code{lautools-browser} & The graphical front end (other manual).\\
+\bottomrule
+\end{longtable}
+
+The tools that read scan metadata use \code{lautools.PETRA}, so they accept the HDF5 file of a scan.
+Every tool prints its options with \code{--help}.
+
+\subsection{tiffScanDataToZarrForMicrotomography}\label{sec:micro}
+
+The conversion of a microtomography scan, and the worked example of the API:
+
+\begin{enumerate}
+\item metadata $\to$ scan dataset:\\ \code{scanDescription = PETRA.ScanDescriptionFactory.fromH5(h5)},\\
+  \code{df = scanDescription.scanDataset()};
+\item scan dataset $\to$ specification: \code{TOMOGRAPHY.scanTiffStackConversionSpecs(df, ...)},
+  extended by \code{--spec-extension};
+\item specification $\to$ arrays: \code{TIFF.execute(TIFF.validate(spec))};
+\item metadata $\to$ the same store: \code{scanDescription.writeZarrGroup(group, scanTable=df)} in
+  mode \code{"a"} (the zip is appended safely by ZARZS); DEN: \code{params.json}.
+\end{enumerate}
+
+\begin{terminalsmall}
+tiffScanDataToZarrForMicrotomography INPUT.h5 OUTPUT [--raw-dir DIR] [--zip] [--v2]
+    [--compression NAME] [--clevel L] [--den] [--dtype DTYPE] [--force] [-j THREADS]
+    [--fill-missing VALUE] [--fix-corrupted-h5] [--spec-extension EXT.json ...]
+    [--write-spec spec.json] [--report report.json] [--check-headers] [--dry-run] [--verbose]
+\end{terminalsmall}
+
+\begin{longtable}{@{}p{4cm}p{10.8cm}@{}}
+\toprule
+\textbf{Option} & \textbf{Meaning}\\
+\midrule
+\endhead
+\code{OUTPUT} & Zarr store (directory, or zip with \code{--zip}; \code{.zar} recommended) or, with \code{--den}, the directory of \code{dar.den}, \code{ref.den}, \code{img.den}.\\
+\code{--raw-dir} & Directory of the TIFF files; default the directory of the HDF5 file.\\
+\code{--compression}, \code{--clevel} & Zarr codec (default blosc-zstd 5; htj2k 0 is lossless).\\
+\code{--den} & DEN files instead of zarr; the directory may exist (e.g.\ the working directory) and its other files are not touched.\\
+\code{--dtype} & dtype of dar, ref, img; default the TIFF dtype (uint16), \code{float32} as \code{rawTiffStructureToDen.py}.\\
+\code{--force} & Replace existing output (for DEN: the files of the arrays).\\
+\code{--fill-missing} & Frames listed in the HDF5 file without a TIFF file are written as this value (null frames, in the report); default an error.\\
+\code{--fix-corrupted-h5} & If the HDF5 file lists no projections, \code{img} are the TIFF files of the raw directory that are not darks or flats.\\
+\code{--spec-extension} & Virtual stacks and arrays added to the generated specification (repeatable).\\
+\code{--write-spec}, \code{--report} & Save the specification and the report (JSON).\\
+\code{--dry-run} & Validate and print what would be written.\\
+\bottomrule
+\end{longtable}
+
+\subsubsection{Replacing the syscripts tools}
+
+\begin{terminalsmall}
+rawTiffStructureToZarr.py h5 h2k_ll.zar --zip --compression htj2k --clevel 0 --raw-dir raw --force
+tiffScanDataToZarrForMicrotomography h5 h2k_ll.zar --zip --compression htj2k --clevel 0 --raw-dir raw --force
+
+rawTiffStructureToDen.py h5 . --raw-dir raw --force
+tiffScanDataToZarrForMicrotomography h5 . --den --dtype float32 --raw-dir raw --force
+\end{terminalsmall}
+
+The zarr stores are the same (tested): arrays, root attributes, and the \code{params} group as the same
+scan description, with two improvements: single strings of 2021 files are strings, not one-element
+arrays, and image codecs get no additional zstd compressor. The DEN files are bit identical to
+\code{rawTiffStructureToDen.py}. Without \code{--dtype float32} the DEN files keep uint16, half the
+size.
+
+\subsubsection{Processing during the conversion}
+
+A specification extension adds virtual stacks and arrays; an array of the same name replaces the
+generated one, \code{null} removes it. Dark field correction with the median of the darks, writing the
+median too:
+
+\begin{terminalsmall}
+{
+  "virtualstacks": {"dar_median": {"stack": "dar", "reduce": "median", "dtype": "uint16"}},
+  "arrays": {
+    "dar_median": {"stack": "dar_median"},
+    "img": {"stack": "img", "dtype": "uint16", "clip": true, "args": ["dar_median"],
+            "lambda": "lambda x, d: x.astype('int32') - d"},
+    "ref": {"stack": "ref", "dtype": "uint16", "clip": true, "args": ["dar_median"],
+            "lambda": "lambda x, d: x.astype('int32') - d"}
+  }
+}
+\end{terminalsmall}
+
+Flat field corrected projections in float32 with the mean flat field, without writing the raw
+projections:
+
+\begin{terminalsmall}
+{
+  "virtualstacks": {"dar_mean": {"stack": "dar", "reduce": "mean"},
+                    "ref_mean": {"stack": "ref", "reduce": "mean"}},
+  "arrays": {
+    "img": null,
+    "img_ffc": {"stack": "img", "dtype": "float32", "args": ["dar_mean", "ref_mean"],
+                "lambda": "lambda x, d, f: (x - d) / np.maximum(f - d, 1)"}
+  }
+}
+\end{terminalsmall}
+
+2$\times$2 binning of 5120$\times$3840 projections: \code{"lambda x: x.reshape(1920, 2, 2560, 2).mean(axis=(1, 3))"}.
+Longer processing goes into a function of an importable module (on \code{PYTHONPATH}), called as
+\code{f(frame, *args)} and returning the frame; e.g.\ a hot pixel filter around
+\code{lautools.preprocess.remove_hot_pixels}, which returns the frame, the mask and a count:
+
+\begin{terminalsmall}
+# myfilters.py
+from lautools import preprocess
+def removeHotPixels(frame, iterations, filterSize):
+    return preprocess.remove_hot_pixels(frame.astype("float32"), iterations, filterSize)[0]
+
+"img": {"stack": "img", "dtype": "float32", "function": "myfilters:removeHotPixels", "args": [1, 5]}
+\end{terminalsmall}
+
+\begin{terminal}
+tiffScanDataToZarrForMicrotomography h5 raw.zar --zip --compression htj2k --clevel 0 \
+    --raw-dir raw --spec-extension dark_correction.json --dry-run
+\end{terminal}
+
+\subsubsection{The specification as a record}
+
+\code{--write-spec} saves the specification that was run, with every frame listed; it can be run
+again or modified with denpy's \code{convertTiffStack}, independently of the HDF5 file. A suggestion
+for recipes (not enforced by any tool): keep the files of the original conversion of a scan together in
+\code{WD/origin/} --- the specification, the report and the zarr store or DEN files --- so that they
+can be kept or removed easily when the working directory gets populated:
+
+\begin{terminal}
+mkdir -p origin
+tiffScanDataToZarrForMicrotomography h5 origin/raw.zar --zip --compression htj2k --clevel 0 \
+    --raw-dir raw --write-spec origin/spec.json --report origin/report.json
+\end{terminal}
+
+\subsubsection{Output layout (zarr)}
+
+\begin{longtable}{@{}p{3.8cm}p{11cm}@{}}
+\toprule
+\textbf{Entry} & \textbf{Content}\\
+\midrule
+\endhead
+root attributes & Experiment info (\code{getExperimentInfo}) and \code{export} (dimensions, counts, dtype, codec, paths).\\
+\code{dar}, \code{ref}, \code{img} & The frames, one per chunk, in acquisition order.\\
+\code{params} & The scan description (the HDF5 entry) and the scan table (\code{columns}, \code{index}, \code{data}: pandas \code{orient="split"}).\\
+\bottomrule
+\end{longtable}
+
+The metadata of a converted store are read back with \code{PETRA.ScanDescriptionFactory.fromZarr} or
+any \code{PETRA} module function given the store; \code{zarrToBeamtimeH5.py} restores the HDF5 file.
+
+\end{document}

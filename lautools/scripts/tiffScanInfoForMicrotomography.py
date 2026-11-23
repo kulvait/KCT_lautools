@@ -35,7 +35,8 @@ from scipy.signal import correlate, find_peaks
 from skimage.restoration import denoise_tv_chambolle
 
 # Project-specific imports
-from denpy import DEN, PETRA, UTILS
+from denpy import DEN, UTILS
+from lautools import PETRA
 
 
 def build_parser():

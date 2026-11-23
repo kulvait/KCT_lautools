@@ -25,34 +25,36 @@ except FileNotFoundError:
     __version__ = "0.0.0"
 
 pkg_requires = [
-    "denpy",
-    "laupy",
+    "denpy[zarr]>=3.0.0",   # DEN, denpy.TIFF, ZARZS; the extra brings zarr, tifffile, imagecodecs, numcodecs
+    "laupy",                # pipelines, submitslurm (and redis) of lautools-browser
+    "pyside6",              # lautools-browser
     "numpy",
-    "zarr",
     "scipy",
     "pandas",
+    "h5py",                 # PETRA: scan HDF5 files
+    "zarr",
+    "imagecodecs",          # zarr image codecs (htj2k, jpeg2k, ...); a recent version: extra codecs
     "scikit-image",
-    "termcolor",
+    "matplotlib",           # tiffScanInfoFor* reports
+    "pillow",               # TIFF reading of the nanotomography scripts
     "platformdirs",
     "GitPython",
-    "imagecodecs",
 ]
 
 extras = {
-    "gui": [
-        "pyside6",
+    # lautools.COR (rotation centre with algotom, used by syscripts detectRotationCenter*)
+    "cor": [
+        "algotom",
     ],
-    "gpu": [
-        "redis",
-        "pycuda",
-        "pyopencl",
+    # a recent imagecodecs: htj2k, jpeg2k, jpegxl, avif, zfp (conda-forge and PyPI for Python 3.12+)
+    "codecs": [
+        "imagecodecs>=2026.11.11",
     ],
+    # kept for existing installs (lautools[gui]): PySide6 is a requirement now
+    "gui": [],
     "full": [
-        "pyside6",
-        "redis",
-        "pycuda",
-        "pyopencl",
-        "imagecodecs>=2026.8.16",
+        "algotom",
+        "imagecodecs>=2026.11.11",
     ],
 }
 

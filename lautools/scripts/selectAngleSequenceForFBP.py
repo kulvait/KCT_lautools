@@ -30,7 +30,7 @@ from contextlib import redirect_stdout
 
 import numpy as np
 from lautools import NANOCT
-from denpy import PETRA
+from lautools import PETRA
 
 
 def crop_preference(start: int, excess: int, mode: str) -> int:
