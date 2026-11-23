@@ -323,7 +323,7 @@ class SubmitslurmContextDialog(QDialog):
                 self.python_status.setText(f"⚠ {e}")
                 self.python_status.setStyleSheet(RED)
         else:
-            self.python_status.setText("off: LAUPY_PYTHON of the console shell if set (not with --vanilla), else the initGanrec default")
+            self.python_status.setText("off: LAUPY_PYTHON of the console shell if set (not with --vanilla), else the initPython default")
             self.python_status.setStyleSheet(GREY)
         self.job_path_project.setToolTip(os.pathsep.join(context.project_path_dirs) or "(no directories configured)")
         error = ""
@@ -345,7 +345,7 @@ class SubmitslurmContextDialog(QDialog):
                                            "listed are the variables submitslurm sets explicitly. Use --vanilla to isolate the jobs.")
                 self.inherit_label.setStyleSheet(GREY)
             else:
-                self.inherit_label.setText("--vanilla: jobs get only SLURM_* and the variables listed here.")
+                self.inherit_label.setText("--vanilla / --vanilla-strict: jobs get only SLURM_* and the variables listed here.")
                 self.inherit_label.setStyleSheet("")
             edited = self._context.path_override is not None
             self.path_title.setText("<b>PATH</b>" + (" (edited, exported as --env PATH)" if edited else " (computed)"))

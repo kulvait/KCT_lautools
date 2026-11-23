@@ -23,11 +23,19 @@ import shutil
 import tempfile
 from timeit import default_timer as timer
 
+import time
+import zipfile
+
 import numpy as np
 from PIL import Image
 import zarr
+try:
+	import tifffile  # about twice as fast as PIL and releases the GIL, so the reading threads scale
+except ImportError:
+	tifffile = None
 
 from denpy import ZAR
+from denpy import ZARZS  # zip store that threads read and write in parallel
 from lautools import NANOCT
 
 
@@ -97,7 +105,9 @@ def buildParser():
 		dest="j",
 		type=int,
 		default=-1,
-		help="Threads: -1 automatic, 0 sequential, positive integer explicit.",
+		help="Threads: -1 automatic (a quarter of the CPUs available to the process, in a SLURM job its "
+			 "allocation, at least 16 and at most 32, but not more than available), 0 sequential, "
+			 "positive integer explicit.",
 	)
 	parser.add_argument("--zip", action="store_true")
 	parser.add_argument("--v2", action="store_true")
@@ -197,8 +207,11 @@ def loadDataset(ARG):
 
 def readTiff(filename):
 	try:
-		with Image.open(filename) as image:
-			array = np.array(image)
+		if tifffile is not None:
+			array = tifffile.imread(filename)
+		else:
+			with Image.open(filename) as image:
+				array = np.array(image)
 	except Exception as error:
 		raise ValueError(f"Could not read TIFF {filename!r}: {error}") from error
 
@@ -317,6 +330,69 @@ def writeZarrArray(df, array, source_dtype, threads, verbose):
 		)
 
 
+# Default thread count, as tiffScanDataToZarrForMicrotomography: a quarter of the CPUs this process may
+# run on (a SLURM job's allocation, not the whole node), at least 16 and at most 32. Measured on
+# Maxwell with 5120x3840 frames: reading the TIFFs limits the speed from about 16-32 threads on.
+DEFAULT_MIN_THREADS, DEFAULT_MAX_THREADS = 16, 32
+
+
+def defaultThreads():
+	try:
+		available = len(os.sched_getaffinity(0))
+	except AttributeError:  # not on Linux
+		available = os.cpu_count() or 1
+	return min(available, max(DEFAULT_MIN_THREADS, min(available // 4, DEFAULT_MAX_THREADS))), available
+
+
+class PhaseTimer:
+	"""Prints the time spent since the previous phase (TIME lines, as the microtomography converter)."""
+
+	def __init__(self):
+		self.last = time.time()
+
+	def report(self, name):
+		now = time.time()
+		print(f"TIME {name}: {now - self.last:.1f}s", flush=True)
+		self.last = now
+
+
+def storedBytes(output, prefixes):
+	"""Bytes stored in the Zarr output (directory or zip) under each of the top level prefixes."""
+	sizes = dict.fromkeys(prefixes, 0)
+	if output.is_file():
+		with zipfile.ZipFile(output) as archive:
+			for info in archive.infolist():
+				top = info.filename.split("/")[0]
+				if top in sizes:
+					sizes[top] += info.compress_size
+	else:
+		for top in prefixes:
+			for root, _, files in os.walk(output / top):
+				sizes[top] += sum(os.path.getsize(os.path.join(root, f)) for f in files)
+	return sizes
+
+
+def reportSizes(output, input_bytes, compression, clevel):
+	"""Print the stored size of each stack compared with its input TIFF files (SIZE lines)."""
+	gib = 1024 ** 3
+	stored = storedBytes(output, list(input_bytes))
+	print(f"SIZE compression {compression} (clevel {clevel}):")
+	for name, tiff in input_bytes.items():
+		if tiff == 0:
+			continue
+		ratio = tiff / stored[name] if stored[name] else float("nan")
+		print(f"SIZE   {name}: TIFF {tiff / gib:.3f} GiB -> Zarr {stored[name] / gib:.3f} GiB, "
+			  f"ratio {ratio:.2f}x ({100 * stored[name] / tiff:.1f}% of TIFF)")
+	if output.is_file():
+		total = output.stat().st_size
+	else:
+		total = sum(os.path.getsize(os.path.join(root, f)) for root, _, files in os.walk(output) for f in files)
+	tiff = sum(input_bytes.values())
+	if tiff > 0 and total > 0:
+		print(f"SIZE   total: TIFF {tiff / gib:.3f} GiB -> output {total / gib:.3f} GiB, ratio {tiff / total:.2f}x "
+			  f"({100 * total / tiff:.1f}% of TIFF, output includes the params metadata)")
+
+
 def removePath(path):
 	if path.is_symlink() or path.is_file():
 		path.unlink()
@@ -340,9 +416,9 @@ def main(argv=None):
 		sys.stderr.write(_err.getvalue())
 		sys.stdout.write(_out.getvalue())
 		return err.code
-	print("START tiffScanDataToZarrForMicrotomography %s" % " ".join(sys.argv[1:]))
-	parser = buildParser()
-	ARG = parser.parse_args(argv)
+	print("START tiffScanDataToZarrForNanotomography %s" % " ".join(arg_list))
+	phase = PhaseTimer()
+	phase_start = phase.last
 
 	if ARG.j < -1:
 		parser.error("-j must be -1, 0, or a positive integer.")
@@ -450,11 +526,16 @@ def main(argv=None):
 	)
 
 	is_zip = ARG.zip or str(output).lower().endswith(".zip")
-	threads = (os.cpu_count() or 1) if ARG.j == -1 else ARG.j
-
-	# Conservative ZIP policy: all writes are sequential.
-	if is_zip:
-		threads = 0
+	if ARG.j == -1:
+		threads, available = defaultThreads()
+		print(f"Starting threadpool of {threads} threads ({available} CPUs available; default a quarter of them, "
+			  f"{DEFAULT_MIN_THREADS} to {DEFAULT_MAX_THREADS})")
+	else:
+		threads = ARG.j
+		print("No threading will be used -j 0." if threads == 0 else f"Starting threadpool of {threads} threads")
+	# Also a zip is written by the threads in parallel (ZARZS.ZipStore)
+	input_bytes = {name: int(sum(os.path.getsize(f) for f in table["image_file"])) for name, table in subsets.items()}
+	phase.report("setup and metadata")
 
 	output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -470,7 +551,8 @@ def main(argv=None):
 
 	try:
 		if is_zip:
-			zip_store = zarr.storage.ZipStore(
+			# threads write their chunks in parallel
+			zip_store = ZARZS.ZipStore(
 				str(temporary_output), mode="w"
 			)
 			store = zip_store
@@ -497,9 +579,11 @@ def main(argv=None):
 					subsets[name], array, source_dtype,
 					threads, ARG.verbose,
 				)
+				phase.report(f"{name} ({counts[name]} frames)")
 		finally:
 			if zip_store is not None:
 				zip_store.close()
+				phase.report("closing the zip")
 
 		if output.exists():
 			if not ARG.force:
@@ -510,11 +594,13 @@ def main(argv=None):
 	finally:
 		shutil.rmtree(workdir, ignore_errors=True)
 
+	reportSizes(output, input_bytes, ARG.compression, ARG.clevel)
 	print(
 		f"Written {output}: "
 		f"IMG={counts['img']}, REF={counts['ref']}, DAR={counts['dar']}; "
 		f"elapsed={timer() - started:.1f}s"
 	)
+	print(f"END tiffScanDataToZarrForNanotomography in {time.strftime('%H:%M:%S', time.gmtime(time.time() - phase_start))}s")
 	return 0
 
 

@@ -107,6 +107,7 @@ import argparse
 from lautools import remove_hot_pixels
 from denpy import DEN 
 from denpy import ZAR
+from denpy import ZARZS  # zip store that threads read and write in parallel
 import zarr
 import numpy as np
 from multiprocessing.dummy import Process, Lock, Pool
@@ -244,6 +245,7 @@ def main():
 	global maskOutputArray
 	global maskIsZarr
 	global outputType
+	zarOutputStore = maskZarOutputStore = None  # Zarr output stores, zip stores are closed at the end
 	
 	if ":" in ARG.inputFile:
 		zarTokens = ARG.inputFile.split(":", 1)
@@ -252,7 +254,7 @@ def main():
 		if zarPath == "/":
 			zarPath = ""
 		if zarStorePath.endswith(".zip") or zarStorePath.endswith(".zar"):
-			zarInputStore = zarr.storage.ZipStore(zarStorePath)
+			zarInputStore = ZARZS.ZipStore(zarStorePath, mode="r")  # threads read in parallel
 		else:
 			zarInputStore = zarr.storage.LocalStore(zarStorePath)
 		log.info(f"Opening Zarr array from store '{zarStorePath}' with path '{zarPath}'")
@@ -287,7 +289,7 @@ def main():
 		if zarPath == "/":
 			zarPath = ""
 		if outputZarStorePath.endswith(".zip") or outputZarStorePath.endswith(".zar"):
-			zarOutputStore = zarr.storage.ZipStore(outputZarStorePath, mode="a")
+			zarOutputStore = ZARZS.ZipStore(outputZarStorePath, mode="a")  # parallel writes, arrays can be overwritten
 			zarOutputStore._sync_open() # After this fix might be removed https://github.com/zarr-developers/zarr-python/issues/3846
 		else:
 			zarOutputStore = zarr.storage.LocalStore(outputZarStorePath, mode="a")
@@ -296,7 +298,7 @@ def main():
 			outputArray = zarr.open_array(zarOutputStore, mode="r+", path=zarPath)
 			if outputArray.shape != (zdim, ydim, xdim) or outputArray.dtype != outputType:
 				asyncio.run(zarOutputStore.delete(zarPath))
-				log.warning(f"Existing Zarr array in store '{outputZarStorePath}' with path '{zarPath}' has incompatible shape {outputArray.shape} or dtype {outputArray.dtype}, expected shape {(zdim, ydim, xdim)} and dtype {outputType}. It will be overwritten and for some stores (e.g. ZipStore) this leads to NotImplementedError")	
+				log.warning(f"Existing Zarr array in store '{outputZarStorePath}' with path '{zarPath}' has incompatible shape {outputArray.shape} or dtype {outputArray.dtype}, expected shape {(zdim, ydim, xdim)} and dtype {outputType}. It will be overwritten.")	
 				outputArrayExists = False
 			else:
 				log.info(f"Using existing Zarr array in store '{outputZarStorePath}' with path '{zarPath}'")
@@ -329,7 +331,7 @@ def main():
 				if maskZarPath == "/":
 					maskZarPath = ""
 				if maskZarStorePath.endswith(".zip") or maskZarStorePath.endswith(".zar"):
-					maskZarOutputStore = zarr.storage.ZipStore(maskZarStorePath, mode="a")
+					maskZarOutputStore = ZARZS.ZipStore(maskZarStorePath, mode="a")
 					maskZarOutputStore._sync_open() # After this fix might be removed https://github.com/zarr-developers/zarr-python/issues/3846
 				else:
 					maskZarOutputStore = zarr.storage.LocalStore(maskZarStorePath, mode="a")
@@ -399,7 +401,9 @@ def main():
 			results.append(res)
 		tp.close()
 		tp.join()
-	
+	# complete the zip stores (each once; the mask may share the store of the output)
+	for store in {id(s): s for s in (zarOutputStore, maskZarOutputStore) if isinstance(s, zarr.storage.ZipStore)}.values():
+		store.close()
 	
 	errors = []
 	total_pixels_corrected = 0
