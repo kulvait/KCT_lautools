@@ -45,6 +45,7 @@ convertTiffStack.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -237,7 +238,9 @@ def main(argv=None):
 			return 0
 		report = TIFF.execute(plan, threads=threads, verbose=arg.verbose, log=lambda m: print(m, flush=True))
 	except (TIFF.SpecError, TIFF.FrameError) as e:
-		print(f"ERROR: {e}", file=sys.stderr)
+		# the spec's output mode is --force here: "w-" without it, "w" with it
+		message = re.sub(r' ?\(mode "w-"\);? use mode "w" to', "; use --force to", str(e))
+		print(f"ERROR: {message}", file=sys.stderr)
 		return 1
 
 	# 4. metadata -> the same store

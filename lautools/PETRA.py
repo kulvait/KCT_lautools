@@ -166,7 +166,10 @@ def fix_timestamps(old_ts, keys=None, fixKnownTimestampIssues=True):
 	  (key 1) whose first time is the first time of the block before it (seen in P05/P07 files: the
 	  flats after the darks and the flats after the projections); fixed by centring it between the
 	  frames before and after it, or at the end of the scan by putting it after the frame before it
-	  with the pause of the transition into that frame's block (moving the object out as long as in);
+	  with the pause of the transition into that frame's block (moving the object out as long as in). Checked against scans with correct timestamps: the darks -> flats
+	  pause is a bit shorter than the flats -> projections pause, and the projections -> flats pause
+	  is about their mean, which is what centring the first flat block and reusing its pause gives.
+	  The P07 software was fixed around 05/2026; newer P07 datasets should not be affected;
 	- repeated (known): a single frame with exactly the time of the frame n rows before it, the frames
 	  around it on time (seen with n = 20); fixed by putting it halfway between its neighbours;
 	- unknown: the default correction.
@@ -228,6 +231,26 @@ def fix_timestamps(old_ts, keys=None, fixKnownTimestampIssues=True):
 			detail += " (time of row %d)" % (first - distance)
 		issues.append((kind, (first, last), detail))
 	return new_ts, issues
+
+
+
+def corrected_frame_times(file_time, key_time=None, key_value=None, fixKnownTimestampIssues=True):
+	"""(image_file times, image_key times) in ms made strictly increasing with fix_timestamps, as
+	scanDataset does (the issues are logged there, not here); None stays None. The keys are used
+	when image_key has one value per time; equal time arrays are corrected once."""
+	def fix(times, keys):
+		times = np.asarray(times).astype(np.int64)
+		if len(times) > 1 and not np.all(np.diff(times) > 0):
+			times = fix_timestamps(times, keys, fixKnownTimestampIssues)[0]
+		return times
+	if key_time is not None and key_value is not None and len(key_value) != len(key_time):
+		key_value = None
+	key_fixed = fix(key_time, key_value) if key_time is not None else None
+	if file_time is None:
+		return None, key_fixed
+	if key_time is not None and np.array_equal(np.asarray(file_time), np.asarray(key_time)):
+		return key_fixed, key_fixed
+	return fix(file_time, None), key_fixed
 
 
 def timestamp_issue_messages(issues, fixKnownTimestampIssues=True):
@@ -610,9 +633,10 @@ class ScanDescription:
 				return group
 		return None
 
-	def getExperimentInfo(self, overrideMagnification=None):
+	def getExperimentInfo(self, overrideMagnification=None, fixKnownTimestampIssues=True):
 		"""Experiment, beamline, times and frame rates, setup (distance, energy), camera (pixel size,
-		field of view) and the Fresnel number of the scan."""
+		field of view) and the Fresnel number of the scan. Times and durations are computed from the
+		frame times corrected as in scanDataset (see fix_timestamps)."""
 		info = {}
 		h5 = os.path.realpath(self.h5Path) if self.h5Path else None
 		info["h5"] = h5
@@ -623,7 +647,10 @@ class ScanDescription:
 		beamlineString = self._string("beamline/name")
 		if beamlineString is not None:
 			info["beamline"] = beamlineString
-		image_file_time = self.root.data("scan/data/image_file/time")
+		image_key = self.root.data("scan/data/image_key/value")
+		image_key_time = self.root.data("scan/data/image_key/time")
+		image_file_time, image_key_time_fixed = corrected_frame_times(self.root.data("scan/data/image_file/time"),
+																	  image_key_time, image_key, fixKnownTimestampIssues)
 		if image_file_time is not None and len(image_file_time) > 0:
 			image_file_time = pd.to_datetime(image_file_time.astype(np.int64), unit="ms")
 			start, end = image_file_time.min(), image_file_time.max()
@@ -632,13 +659,11 @@ class ScanDescription:
 			info["scan_frame_count"] = len(image_file_time)
 			info["scan_duration_sec"] = (end - start).total_seconds()
 			info["scan_fps"] = len(image_file_time) / info["scan_duration_sec"] if info["scan_duration_sec"] > 0 else None
-		image_key = self.root.data("scan/data/image_key/value")
-		image_key_time = self.root.data("scan/data/image_key/time")
 		if image_key is not None and image_key_time is not None:
 			if len(image_key) != len(image_key_time):
 				log.warning("image_key has %d values but %d times in %s; sample frame statistics skipped." % (len(image_key), len(image_key_time), self.name))
 			else:
-				image_times = pd.to_datetime(image_key_time[image_key == 0].astype(np.int64), unit="ms")
+				image_times = pd.to_datetime(image_key_time_fixed[np.asarray(image_key) == 0], unit="ms")
 				if len(image_times) > 0:
 					info["sample_frame_count"] = len(image_times)
 					info["sample_duration_sec"] = (image_times.max() - image_times.min()).total_seconds()
@@ -1029,8 +1054,8 @@ class ScanDescriptionFactory:
 # The source of these functions is an HDF5 file (name or h5py object), a zarr store with a params
 # group (name or zarr.Group) or a ScanDescription.
 
-def getExperimentInfo(h5file, overrideMagnification=None):
-	return ScanDescriptionFactory.create(h5file).getExperimentInfo(overrideMagnification)
+def getExperimentInfo(h5file, overrideMagnification=None, fixKnownTimestampIssues=True):
+	return ScanDescriptionFactory.create(h5file).getExperimentInfo(overrideMagnification, fixKnownTimestampIssues)
 
 
 def getBasicDatasetInfo(h5file):

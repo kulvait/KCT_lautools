@@ -195,9 +195,9 @@ Paths are relative to \code{/entry} (HDF5) or \code{params} (zarr): \code{d.root
 \textbf{Method} & \textbf{Result}\\
 \midrule
 \endhead
-\code{scanDataset(includeCurrent,} \code{timeOffsetSec)} & DataFrame of the frames in acquisition order: \code{time}, \code{image_key} (0 projection, 1 flat, 2 dark), \code{image_file} and the logs of \code{scan/data} (\code{s_rot}, \code{s_stage_x}, \dots); with \code{includeCurrent} the beam current interpolated at the frame times. Index: UNIX time in ms.\\
+\code{scanDataset(includeCurrent,} \code{timeOffsetSec,} \code{fixKnownTimestampIssues=True)} & DataFrame of the frames in acquisition order: \code{time}, \code{image_key} (0 projection, 1 flat, 2 dark), \code{image_file} and the logs of \code{scan/data} (\code{s_rot}, \code{s_stage_x}, \dots); with \code{includeCurrent} the beam current interpolated at the frame times. Index: UNIX time in ms, strictly increasing (section~\ref{sec:timestamps}).\\
 \code{imageDataset(image_key,} \code{includeCurrent,} \code{includePixelShift)} & The frames of one key with \code{frame_ind}, optionally \code{pixel_shift} from \code{s_stage_x}.\\
-\code{getExperimentInfo(} \code{overrideMagnification)} & Experiment, beamline, times, frame rates, setup (distance, energy), camera (pixel size, field of view), Fresnel number.\\
+\code{getExperimentInfo(} \code{overrideMagnification,} \code{fixKnownTimestampIssues=True)} & Experiment, beamline, times and frame rates (from the corrected frame times, section~\ref{sec:timestamps}), setup (distance, energy), camera (pixel size, field of view), Fresnel number.\\
 \code{beamCurrentDataset(} \code{timeOffsetSec)} & Beam current readings; \code{BeamCurrentError} if there are none.\\
 \code{findInsertionEvents(...)} & Top-up injections in the current.\\
 \code{getBasicDatasetInfo()} & The frame table as logged (ms times).\\
@@ -224,6 +224,39 @@ df = PETRA.scanDataset("raw.zar", includeCurrent=True)       # the same from the
 
 \code{denpy.PETRA} stays as the legacy implementation; the lautools tests compare both on synthetic
 scans and on real beamline files.
+
+\subsection{Timestamp issues}\label{sec:timestamps}
+
+The frame times of some P05/P07 files repeat or drop back. The P07 software was fixed around
+05/2026; newer P07 datasets should not be affected. \code{scanDataset} makes the
+times strictly increasing, keeping the order of the frames, with \code{fix_timestamps(old_ts, keys,}
+\code{fixKnownTimestampIssues)}, which returns the times and the issues found. Each issue is logged
+as one line (\code{timestamp_issue_messages}):
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{5.4cm}p{9.4cm}@{}}
+\toprule
+\textbf{Message (Timestamp issue: \dots)} & \textbf{Cause and fix}\\
+\midrule
+\endhead
+found known structure of wrongly positioned flat field blocks within acquisition & A flat field
+block is stamped with the start of the block before it (the flats after the darks, the flats after
+the projections). It is centred between the frames before and after it; at the end of the scan it
+is put after the last projection with the pause found at the transition into the projections
+(moving the object out takes as long as moving it in).\\
+found repeated value with $n$ items offset from original & A single frame carries the time of the
+frame $n$ rows before it (seen with $n=20$), its neighbours are on time. It is put halfway between
+them.\\
+unknown issue encountered proceeding with default correction & Any other drop. From the first zero
+or negative step on, the frames are put 1\,ms after the frame before them keeping their steps, until
+an original time is later again; only the frames with a wrong time are moved.\\
+\bottomrule
+\end{longtable}
+
+The flat block fix was checked on scans with correct times: the darks $\to$ flats pause is a bit
+shorter than the flats $\to$ projections pause and the projections $\to$ flats pause is about their
+mean, which is what centring the first flat block and reusing its pause gives. With
+\code{fixKnownTimestampIssues=False} the known issues are reported but get the default correction.
+Only the times change; the frame order, keys and files stay as logged.
 
 \subsection{Writing: zarr and HDF5}
 
