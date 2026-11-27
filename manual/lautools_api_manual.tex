@@ -212,8 +212,7 @@ Paths are relative to \code{/entry} (HDF5) or \code{params} (zarr): \code{d.root
 
 The module functions of \code{denpy.PETRA} exist with the same signatures and results:
 \code{scanDataset}, \code{imageDataset}, \code{getExperimentInfo}, \code{beamCurrentDataset},
-\code{findInsertionEvents}, \code{getBasicDatasetInfo}, \code{BeamCurrentError},
-\code{scanDatasetNanotomography}. They take an HDF5 file (name or h5py object), a zarr store with a
+\code{findInsertionEvents}, \code{getBasicDatasetInfo}, \code{BeamCurrentError}. They take an HDF5 file (name or h5py object), a zarr store with a
 \code{params} group, or a \code{ScanDescription}. Migration is the import:
 
 \begin{terminal}
@@ -222,7 +221,8 @@ df = PETRA.scanDataset("scan.h5", includeCurrent=True)
 df = PETRA.scanDataset("raw.zar", includeCurrent=True)       # the same from the converted store
 \end{terminal}
 
-\code{denpy.PETRA} stays as the legacy implementation; the lautools tests compare both on synthetic
+Nanotomography scans (LogScan.log and a TIFF directory) are read by \code{NANOCT.scanDataset}
+(section~\ref{sec:nanoct}), not by PETRA. \code{denpy.PETRA} stays as the legacy implementation; the lautools tests compare both on synthetic
 scans and on real beamline files.
 
 \subsection{Timestamp issues}\label{sec:timestamps}
