@@ -81,6 +81,7 @@ setup(
             "tiffScanDataToZarrForNanotomography = lautools.scripts.tiffScanDataToZarrForNanotomography:main",
             "tiffScanDataToZarrForMicrotomography = lautools.scripts.tiffScanDataToZarrForMicrotomography:main",
             "currentCorrect = lautools.scripts.currentCorrect:main",
+            "createProjectionMatrices = lautools.scripts.createProjectionMatrices:main",
         ]
     },
     version=__version__,

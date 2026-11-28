@@ -23,6 +23,8 @@ import pandas as pd
 import numpy as np
 from scipy.signal import find_peaks
 
+from lautools import CT
+
 import logging
 # Create a logger specific to this module
 log = logging.getLogger(__name__)
@@ -396,10 +398,11 @@ class ScanDescriptionFactory:
 		raise TypeError(f"Can not describe a scan from {type(source).__name__}")
 
 
-class ScanDescription:
-	"""The metadata of a P05 scan in the canonical form (see above), from an HDF5 file or the params
-	group of a zarr store (ScanDescriptionFactory), with the analyses of the scan and the writers to
-	zarr and to HDF5 (2025 layout).
+class ScanDescriptionMicrotomography(CT.ScanDescription):
+	"""The metadata of a P05/P07 microtomography scan in the canonical form (see above), from an HDF5
+	file or the params group of a zarr store (ScanDescriptionFactory), with the analyses of the scan
+	and the writers to zarr and to HDF5 (2025 layout). Implements CT.ScanDescription; also available
+	as PETRA.ScanDescription.
 
 	root: the ScanGroup of /entry (HDF5) or params (zarr).
 	source: the file or store it was read from; h5Path: the HDF5 file of the scan (for a zarr
@@ -452,6 +455,23 @@ class ScanDescription:
 			if group is not None:
 				return group
 		return None
+
+	def detectorGeometry(self, overrideMagnification=None):
+		"""CT.DetectorGeometry2D: the camera ROI (else the sensor) and the effective pixel size, camera
+		pixel size / magnification in mm (as pix_size of getExperimentInfo); ValueError if the camera
+		group or one of these values is missing."""
+		camera_group = self._find_camera_group()
+		if camera_group is None:
+			raise ValueError("Neither 'entry/hardware/camera' nor 'entry/hardware/camera1' exists in %s." % self.name)
+		values = _read_camera_values(camera_group, camera_group.scalars(), overrideMagnification)
+		width = values["roi_width"] if values["roi_width"] is not None else values["sensorsize_x"]
+		height = values["roi_height"] if values["roi_height"] is not None else values["sensorsize_y"]
+		missing = [k for k, v in (("pixelsize", values["pixelsize"]), ("magnification", values["magnification"]),
+								  ("roi_width or sensorsize_x", width), ("roi_height or sensorsize_y", height)) if v is None]
+		if missing:
+			raise ValueError("No usable camera %s in %s, can not describe the detector." % (", ".join(missing), self.name))
+		pixel_size = values["pixelsize"] / values["magnification"]
+		return CT.DetectorGeometry2D(sizex=int(width), sizey=int(height), pixel_sizex=pixel_size, pixel_sizey=pixel_size)
 
 	def getExperimentInfo(self, overrideMagnification=None, fixKnownTimestampIssues=True):
 		"""Experiment, beamline, times and frame rates, setup (distance, energy), camera (pixel size,
@@ -611,13 +631,21 @@ class ScanDescription:
 			df["time"] = pd.to_datetime(df.index, unit="ms")
 		return df
 
-	def scanDataset(self, includeCurrent=False, timeOffsetSec=None, fixKnownTimestampIssues=True):
+	def scanDataset(self, includeCurrent=False, timeOffsetSec=None, fixKnownTimestampIssues=True,
+					integerShifts=False, overrideMagnification=None):
 		"""DataFrame of the frames of a scan: time, image_key, image_file and the logs of entry/scan/data.
 
 		With includeCurrent, the column current holds the beam current interpolated at the frame times
 		(constant before the first and after the last reading); raises BeamCurrentError if there is no
 		usable beam current. timeOffsetSec is the offset applied to the current readings to be in sync
 		with the frame times.
+
+		With integerShifts, s_stage_x (still mm, float) is put on the grid pos0 + k * pixel_sizex of
+		detectorGeometry(overrideMagnification), so that the frames differ by whole pixels; pos0 is
+		chosen so that the projection jitter has zero mean, the zero of s_stage_x is not changed. The
+		recorded values are in s_stage_x_orig and s_stage_x_jitter = s_stage_x_orig - s_stage_x. A
+		warning is logged if a projection is more than 0.2 um off the grid (a step scan whose steps
+		are not whole pixels).
 		"""
 		if timeOffsetSec is None:
 			timeOffsetSec = 0.0
@@ -655,9 +683,36 @@ class ScanDescription:
 				log.warning("%d of %d frames of %s are outside the beam current readings; the first/last reading is used for them." % (outside, len(df), self.name))
 			df["current"] = np.interp(frame_times, current_times, currentFrame["current"].to_numpy(dtype=np.float64))
 		df = df.sort_values("time", ascending=True)
+		if integerShifts:
+			if "s_stage_x" not in df.columns:
+				raise ValueError("No s_stage_x log in %s, can not make integer shifts." % self.name)
+			pixel_size = self.detectorGeometry(overrideMagnification).pixel_sizex
+			orig = df["s_stage_x"].to_numpy(dtype=np.float64)
+			# the frames that define the grid: the projections with a position (NaN where not logged)
+			projections = (df["image_key"].to_numpy() == 0) & np.isfinite(orig)
+			if not projections.any():
+				projections = np.isfinite(orig)
+			if not projections.any():
+				raise ValueError("No s_stage_x values in %s, can not make integer shifts." % self.name)
+			# Grid pos0 + k * pixel_size: pos0 is the circular mean of the projection positions modulo
+			# the pixel size, refined so that the mean projection jitter is zero. The zero of s_stage_x
+			# is kept, only the differences between frames become whole pixels.
+			phase = np.exp(2j * np.pi * orig[projections] / pixel_size)
+			pos0 = pixel_size * np.angle(phase.mean()) / (2.0 * np.pi)
+			for _ in range(2):
+				k = np.round((orig - pos0) / pixel_size)
+				jitter = orig - pos0 - k * pixel_size
+				pos0 += jitter[projections].mean()
+			k = np.round((orig - pos0) / pixel_size)
+			grid = pos0 + k * pixel_size
+			jitter = orig - grid
+			max_jitter = np.abs(jitter[projections]).max()
+			if max_jitter > 0.0002:
+				log.warning("The s_stage_x of the projections of %s deviate up to %.3f um from the grid of whole pixels (%.4f um); the integer shifts move them by that much." % (self.name, 1000.0 * max_jitter, 1000.0 * pixel_size))
+			df = df.assign(s_stage_x=grid, s_stage_x_orig=orig, s_stage_x_jitter=jitter)
 		return df
 
-	def imageDataset(self, image_key=0, includeCurrent=True, includePixelShift=False, overrideMagnification=None,
+	def imageDataset(self, image_key=0, includeCurrent=False, includePixelShift=False, overrideMagnification=None,
 					 fixKnownTimestampIssues=True):
 		"""The frames of one image_key with frame_ind and optionally pixel_shift (from s_stage_x)."""
 		df = self.scanDataset(includeCurrent, fixKnownTimestampIssues=fixKnownTimestampIssues)
@@ -711,6 +766,9 @@ class ScanDescription:
 		no compression."""
 		with h5py.File(path, "w") as h5:
 			_write_h5_group(self.root, h5.create_group("entry"), chunk)
+
+
+ScanDescription = ScanDescriptionMicrotomography  # the name before the CT interface
 
 
 class ScanGroup:

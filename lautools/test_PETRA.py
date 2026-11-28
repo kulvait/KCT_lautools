@@ -17,6 +17,7 @@ syscripts_update with exampleA.h5, exampleB.h5, example03-05.h5); without it the
 
 @author: Vojtech Kulvait
 """
+import logging
 import os
 import pathlib
 import tempfile
@@ -26,7 +27,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from lautools import PETRA
+from lautools import CT, PETRA
 
 KEYS = [2, 2, 1, 1, 1, 0, 0, 0, 0, 1]
 T0 = 1_758_209_568_000
@@ -538,7 +539,6 @@ class TestAgainstDenpyPETRA(unittest.TestCase):
 				("imageDataset", (0, False, True)), ("findInsertionEvents", ()))
 
 	def compare(self, path):
-		import logging
 		from denpy import PETRA as denpyPETRA
 		logging.disable(logging.WARNING)
 		try:
@@ -574,6 +574,91 @@ class TestAgainstDenpyPETRA(unittest.TestCase):
 	def test_real_files(self):
 		for path in real_files():
 			self.compare(path)
+
+
+class TestCTInterface(unittest.TestCase):
+	"""ScanDescriptionMicrotomography implements CT.ScanDescription: the scanDataset contract and
+	a detectorGeometry consistent with getExperimentInfo."""
+
+	def check(self, path):
+		with self.subTest(path=os.path.basename(path)):
+			scan = PETRA.ScanDescriptionFactory.create(path)
+			self.assertIsInstance(scan, CT.ScanDescription)
+			self.assertIs(PETRA.ScanDescription, PETRA.ScanDescriptionMicrotomography)
+			CT.validateScanDataset(scan.scanDataset(), name=path)
+			images = scan.imageDataset()
+			self.assertEqual(set(images["image_key"]), {0})
+			np.testing.assert_array_equal(images["frame_ind"], np.arange(len(images)))
+			self.assertNotIn("current", images.columns)
+			info = scan.getExperimentInfo()
+			det = scan.detectorGeometry()
+			self.assertAlmostEqual(det.pixel_sizex, info["pix_size"])
+			self.assertAlmostEqual(det.pixel_sizey, info["pix_size"])
+			self.assertEqual((det.sizex, det.sizey), (int(info["camera"]["roi_width"]), int(info["camera"]["roi_height"])))
+			self.assertAlmostEqual(scan.detectorGeometry(overrideMagnification=13.0).pixel_sizex,
+								   PETRA.getExperimentInfo(path, overrideMagnification=13.0)["pix_size"])
+			self.check_integer_shifts(scan, det.pixel_sizex)
+
+	def check_integer_shifts(self, scan, pixel_size):
+		plain = scan.scanDataset()
+		df = scan.scanDataset(integerShifts=True)
+		self.assertNotIn("s_stage_x_orig", plain.columns)
+		np.testing.assert_array_equal(df["s_stage_x_orig"], plain["s_stage_x"])
+		np.testing.assert_allclose(df["s_stage_x"] + df["s_stage_x_jitter"], df["s_stage_x_orig"], rtol=0, atol=1e-12)
+		steps = (df["s_stage_x"].dropna() - df["s_stage_x"].dropna().iloc[0]) / pixel_size
+		np.testing.assert_allclose(steps, np.round(steps), rtol=0, atol=1e-6)
+		projections = df["image_key"] == 0
+		self.assertLess(abs(df.loc[projections, "s_stage_x_jitter"].mean()), 1e-9)
+		self.assertLessEqual(np.nanmax(np.abs(df["s_stage_x_jitter"])), 0.5 * pixel_size + 1e-12)
+
+	def test_integer_shifts_grid(self):
+		"""Positions 0.3 px + whole pixels with +-0.05 px jitter: the grid keeps the 0.3 px offset
+		(the zero of s_stage_x), the jitter is recovered; a step scan off the grid warns."""
+		def stage(positions):
+			def mutate(h5):
+				group = h5["entry/scan/data/s_stage_x"]
+				n = group["value"].shape[0]
+				del group["value"]
+				group["value"] = positions(n)
+			return mutate
+		with tempfile.TemporaryDirectory() as tmp:
+			path = make_scan(os.path.join(tmp, "scan.h5"))
+			pixel_size = PETRA.ScanDescriptionFactory.create(path).detectorGeometry().pixel_sizex
+			rng = np.random.default_rng(1)
+			jitter = lambda n: 0.05 * pixel_size * rng.uniform(-1, 1, n)
+			scan = PETRA.ScanDescriptionFactory.create(make_scan(os.path.join(tmp, "jitter.h5"),
+				mutate=stage(lambda n: pixel_size * (100.3 + np.arange(n) % 3) + jitter(n))))
+			df = scan.scanDataset(integerShifts=True).dropna(subset=["s_stage_x"])
+			offset = df["s_stage_x"] / pixel_size - np.round(df["s_stage_x"] / pixel_size)
+			np.testing.assert_allclose(offset, 0.3, atol=0.03)
+			self.check_integer_shifts(scan, pixel_size)
+			scan = PETRA.ScanDescriptionFactory.create(make_scan(os.path.join(tmp, "steps.h5"),
+				mutate=stage(lambda n: 0.37 * pixel_size * np.arange(n))))
+			with self.assertLogs("lautools.PETRA", "WARNING") as logs:
+				scan.scanDataset(integerShifts=True)
+			self.assertTrue(any("grid of whole pixels" in line for line in logs.output))
+
+	def test_synthetic(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			for style in ("2021", "2025"):
+				self.check(make_scan(os.path.join(tmp, f"{style}.h5"), style=style))
+
+	def test_no_camera(self):
+		def no_camera(h5):
+			del h5["entry/hardware/camera"]
+		with tempfile.TemporaryDirectory() as tmp:
+			scan = PETRA.ScanDescriptionFactory.create(make_scan(os.path.join(tmp, "scan.h5"), mutate=no_camera))
+			with self.assertRaisesRegex(ValueError, "camera"):
+				scan.detectorGeometry()
+
+	@unittest.skipUnless(real_files(), "set LAUTOOLS_PETRA_TEST_FILES to a directory with scan HDF5 files")
+	def test_real_files(self):
+		logging.disable(logging.WARNING)
+		try:
+			for path in real_files():
+				self.check(path)
+		finally:
+			logging.disable(logging.NOTSET)
 
 
 if __name__ == "__main__":

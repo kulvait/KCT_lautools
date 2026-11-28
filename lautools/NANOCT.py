@@ -1,11 +1,14 @@
 import pandas as pd
 import numpy as np
 import re
+import tifffile
 from glob import glob
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import logging
+
+from lautools import CT
 
 # Create a logger specific to this module
 log = logging.getLogger(__name__)
@@ -480,3 +483,62 @@ def scanDatasetWithForeignDarkFields(
 	)
 
 	return pd.concat([dataset, dark_fields], ignore_index=True)
+
+
+class ScanDescriptionNanotomography(CT.ScanDescription):
+	"""A P05 nanotomography scan: LogScan.log and the directory of its TIFF files, as
+	CT.ScanDescription. scanDataset is NANOCT.scanDataset with the index the UNIX time in ms.
+
+	pixelSize_mm: the effective pixel size; the log does not record it, without it the detector
+	pixel size is 1.0. one_based, drop_missing, check_block_order: see scanDataset.
+	"""
+
+	def __init__(self, logScan, imgDir=None, pixelSize_mm=None, one_based=True, drop_missing=True,
+				 check_block_order=True):
+		self.logScan = logScan
+		self.imgDir = imgDir
+		self.pixelSize_mm = pixelSize_mm
+		self.options = {"one_based": one_based, "drop_missing": drop_missing, "check_block_order": check_block_order}
+
+	@property
+	def name(self):
+		return self.logScan
+
+	def scanDataset(self, includeCurrent=False):
+		"""NANOCT.scanDataset of the log and directory, index the UNIX time in ms; the column current
+		(from the log rows) only with includeCurrent."""
+		df = scanDataset(self.logScan, imgDir=self.imgDir, **self.options)
+		if df.empty:
+			raise ValueError(f"No frames in {self.logScan}.")
+		df.index = pd.DatetimeIndex(df["time"]).asi8 // 1_000_000
+		if not np.all(np.diff(df.index.to_numpy()) > 0):
+			log.warning("The frame times of %s are not strictly increasing.", self.logScan)
+		if not includeCurrent:
+			df = df.drop(columns=["current"])
+		return df
+
+	def detectorGeometry(self):
+		"""CT.DetectorGeometry2D: the size of the first TIFF file of the scan, the pixel size
+		pixelSize_mm or 1.0; ValueError without imgDir or TIFF files."""
+		if self.imgDir is None:
+			raise ValueError(f"No image directory given for {self.logScan}, can not describe the detector.")
+		df = scanDataset(self.logScan, imgDir=self.imgDir, **self.options)
+		files = [f for f, ok in zip(df.get("image_file", []), df.get("file_exists", [])) if ok]
+		if not files:
+			raise ValueError(f"No TIFF files of {self.logScan} in {self.imgDir}, can not describe the detector.")
+		with tifffile.TiffFile(files[0]) as tif:
+			height, width = tif.pages[0].shape[:2]
+		pixel_size = 1.0 if self.pixelSize_mm is None else float(self.pixelSize_mm)
+		return CT.DetectorGeometry2D(sizex=int(width), sizey=int(height), pixel_sizex=pixel_size, pixel_sizey=pixel_size)
+
+	def beamCurrentDataset(self):
+		"""The beam current of every log row (mA): index the UNIX time in ms, columns time and
+		current; the first reading of a repeated time."""
+		start_time, rows = _parse_log(self.logScan)
+		if not rows:
+			raise ValueError(f"No log rows in {self.logScan}.")
+		ms = np.array([int(round((start_time + row["timestamp"]) * 1000)) for row in rows], dtype=np.int64)
+		df = pd.DataFrame({"time": pd.to_datetime(ms, unit="ms", utc=True),
+						   "current": np.array([row["current"] for row in rows], dtype=np.float64)}, index=ms)
+		df = df[~df.index.duplicated(keep="first")]
+		return df.sort_index()
